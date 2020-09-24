@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+    <AspNetCoreHostingModel>InProcess</AspNetCoreHostingModel>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <UserSecretsId>6c317027-ef8e-47c2-9c56-1dcaa25e3032</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\COLID.IndexingCrawlerService.Repositories\COLID.IndexingCrawlerService.Repositories.csproj" />
+    <ProjectReference Include="..\COLID.IndexingCrawlerService.Services\COLID.IndexingCrawlerService.Services.csproj" />
+  </ItemGroup>
+
+</Project>
