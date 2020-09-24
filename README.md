@@ -1,6 +1,12 @@
 # COLID Indexing Crawler Service
 
-The Index Crawler Service (ICS) is responsible to extract data from a RDF storage system, transform and enrich the data and finally to send it via a message queue to the DMP Webservice for indexing.
+The Indexing Crawler Service is part of the Corporate Linked Data Catalog - short: COLID - application.
+[Here](https://colid.pages.gitlab.bayer.com/docs/tech/#/?id=introduction) you can find an introduction to the application.
+A description of all its functions is [here](https://colid.pages.gitlab.bayer.com/docs/tech/#/functional-specification).
+
+The complete guide can be found at the following [link](https://bayer-group.github.io/colid-documentation).
+
+The Indexing Crawler Service (ICS) is responsible to extract data from a RDF storage system, transform and enrich the data and finally to send it via a message queue to the DMP Webservice for indexing.
 
 ## Getting Started
 
