@@ -24,10 +24,10 @@ namespace COLID.IndexingCrawlerService.WebApi
         /// </summary>
         /// <param name="app">The application builder</param>
         /// <param name="env">The environment</param>
-        public void ConfigureDevelopment(IApplicationBuilder app, IWebHostEnvironment env)
+        public void ConfigureDevelopment(IApplicationBuilder app)
         {
             app.UseDeveloperExceptionPage();
-            Configure(app, env);
+            Configure(app);
         }
     }
 }

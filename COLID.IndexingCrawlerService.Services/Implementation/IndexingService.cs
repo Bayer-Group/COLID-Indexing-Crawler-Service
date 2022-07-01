@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
@@ -7,6 +8,7 @@ using System.Threading.Tasks;
 using System.Web;
 using COLID.Cache.Services;
 using COLID.Common.Extensions;
+using COLID.Common.Utilities;
 using COLID.Graph.HashGenerator.Services;
 using COLID.Graph.Metadata.DataModels.MessageQueuing;
 using COLID.Graph.Metadata.DataModels.Metadata;
@@ -14,6 +16,8 @@ using COLID.Graph.Metadata.DataModels.Resources;
 using COLID.Graph.Metadata.Extensions;
 using COLID.Graph.Metadata.Services;
 using COLID.Graph.TripleStore.DataModels.Base;
+using COLID.Graph.TripleStore.DataModels.Index;
+using COLID.Graph.TripleStore.DataModels.Resources;
 using COLID.Graph.TripleStore.DataModels.Taxonomies;
 using COLID.Graph.TripleStore.Extensions;
 using COLID.Identity.Extensions;
@@ -24,6 +28,7 @@ using COLID.IndexingCrawlerService.Services.Interface;
 using COLID.MessageQueue.Configuration;
 using COLID.MessageQueue.Datamodel;
 using COLID.MessageQueue.Services;
+using CorrelationId.Abstractions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -45,6 +50,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         private readonly IMetadataService _metadataService;
         private readonly IResourceService _resourceService;
         private readonly IEntityService _entityService;
+        private readonly ICorrelationContextAccessor _correlationContext;
         private readonly IConfiguration _configuration;
         private readonly ColidMessageQueueOptions _mqOptions;
         private readonly JsonSerializerSettings _serializerSettings;
@@ -53,11 +59,11 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         private const string ResourceId = "resourceId";
         private const string InternalResourceId = "internalResourceId";
         private const string ResourceHash = "resourceHash";
+        private const string ResourceLinkedLifecycleStatus = "resourceLinkedLifecycleStatus";
 
         public IDictionary<string, Action<string>> OnTopicReceivers => new Dictionary<string, Action<string>>() {
-            {_mqOptions.Topics["TopicResourcePublishedPidUriIndexing"], SendPublishedResourceIndex },
-            {_mqOptions.Topics["TopicResourcePublishedPidUri"], SendPublishedResource },
-            {_mqOptions.Topics["TopicResourceDeletedPidUri"], SendResourceDeleted }
+            {_mqOptions.Topics["ReindexingResources"], ReindexResource },
+            {_mqOptions.Topics["IndexingResources"], IndexResourceFromTopic }
         };
 
         public Action<string, string, BasicProperty> PublishMessage { get; set; }
@@ -71,6 +77,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             IEntityService entityService,
             IHttpClientFactory clientFactory,
             IEntityHasher hasher,
+            ICorrelationContextAccessor correlationContext,
             IConfiguration configuration,
             ITokenService<ColidRegistrationServiceTokenOptions> registrationServiceTokenService,
             ITokenService<ColidSearchServiceTokenOptions> searchServiceTokenService,
@@ -83,6 +90,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             _cacheService = cacheService;
             _entityService = entityService;
             _clientFactory = clientFactory;
+            _correlationContext = correlationContext;
             _hasher = hasher;
             _configuration = configuration;
             _registrationServiceTokenService = registrationServiceTokenService;
@@ -107,19 +115,18 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 _logger.LogInformation("[Reindexing] Sending metadata to search service: " + searchServiceIndexCreateUrl);
 
                 var accessToken = await _searchServiceTokenService.GetAccessTokenForWebApiAsync();
-                var response = await httpClient.SendRequestWithBearerTokenAsync(HttpMethod.Post, searchServiceIndexCreateUrl,
-                    metadataMapping, accessToken, _cancellationToken);
+                var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Post, searchServiceIndexCreateUrl,
+                    metadataMapping, accessToken, _cancellationToken, _correlationContext.CorrelationContext);
 
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogError("[Reindexing] Something went wrong while starting reindexing\nResponse Content={responseContent}", response.Content);
                     throw new System.Exception("Something went wrong while starting reindexing");
                 }
-
-                SendAllResources();
-
-                return;
             }
+
+            _resourceService.DeleteCachedResources();
+            SendAllResources();
         }
 
         /// <summary>
@@ -130,163 +137,332 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             _logger.LogInformation("[Reindexing] Send all resources");
 
             _logger.LogInformation("[Reindexing] Getting all resource pid uris");
-            var pidUris = _resourceService.GetAllPublishedPidUris();
+            var pidUris = _resourceService.GetAllPidUris();
 
             _logger.LogInformation("[Reindexing] Sending {pidUrisCount} resources", pidUris.Count);
 
+            var ind = 0;
             foreach (var pidUri in pidUris)
             {
                 try
                 {
                     _logger.LogInformation("[Reindexing] Sending PID URI to topic\nPidUri={PidUri}\nMqTopic={MQTopic}", pidUri, "TopicResourcePublishedPidUriIndexing");
-                    PublishMessage(_mqOptions.Topics["TopicResourcePublishedPidUriIndexing"], pidUri.ToString(), new BasicProperty() { Priority = 0 });
+                    PublishMessage(_mqOptions.Topics["ReindexingResources"], pidUri.ToString(), new BasicProperty() { Priority = 0 });
+                    ind = ind + 1;
+                    if (ind % 10 == 0)
+                    {
+                        _logger.LogInformation("Written " + ind + 1 + "resources to ReindxingResources Topic");
+                    }
                 }
                 catch (System.Exception ex)
                 {
                     _logger.LogError(ex, "[Reindexing] FAILED - Sending PID URI to topic\nPidUri={PidUri}\nMqTopic={MQTopic}", pidUri, "TopicResourcePublishedPidUriIndexing");
                 }
             }
+            _logger.LogInformation("[Reindexing] Actual count of resources sent to queue: " + (ind + 1));
+            var lastPidUris= Enumerable.Reverse(pidUris).Take(5).Reverse().ToList();
+            var message = JsonConvert.SerializeObject(new { lastPidUris = lastPidUris }, _serializerSettings);
+            _logger.LogInformation("[Reindexing] Sending last5PidUris {message} to ReindexingSwitch Topic", message);
+            try
+            {
+                PublishMessage(_mqOptions.Topics["ReindexingSwitch"], message, new BasicProperty() { Priority = 0 });
+            }
+            catch (System.Exception ex)
+            {
+                _logger.LogError(ex, "[Reindexing] Something went wrong while sending the last5PidUris.\nPidUri={lastPidUri}\nMqTopic=ReindexingSwitch", message);
+            }
         }
 
-        /// <summary>
-        /// Send the published resource and its links to the mq
-        /// </summary>
-        /// <param name="pidUri">PID URI of published resource</param>
-        public void SendPublishedResource(string pidUriString)
+        public void IndexResource(ResourceIndexingDTO resourceIndexingDto)
         {
-            byte priority = 0;
+            Guard.ArgumentNotNull(resourceIndexingDto, nameof(resourceIndexingDto));
 
-            if (!Uri.TryCreate(pidUriString, UriKind.Absolute, out Uri pidUri))
+            try
             {
-                _logger.LogError("[Indexing] Sending the published resource failed - invalid url.\nPidUri={PidUri}", pidUriString);
-                return;
-            }
+                _logger.LogInformation("[Indexing] Start indexing for pid uri {pidUri} with action {action}",
+                resourceIndexingDto.PidUri, resourceIndexingDto.Action);
 
-            var resource = _resourceService.GetPublishedResourceByPidUri(pidUri);
-
-            if (resource == null)
-            {
-                _logger.LogError("[Indexing] Sending the published resource failed - no resource found.\nPidUri={PidUri}", pidUriString);
-                return;
-            }
-
-            string resourceType = resource.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
-
-            var metadataProperties = _metadataService.GetMetadataForEntityType(resourceType);
-
-            var linkedPidUris = resource.GetLinks(metadataProperties);
-
-            SendPublishedResource(resource, metadataProperties, priority);
-
-            foreach (var linkedPidUri in linkedPidUris)
-            {
-                // To avoid that a change in the repo causes the main resource to be published more than once
-                if (linkedPidUri != pidUriString)
+                switch (resourceIndexingDto.Action)
                 {
-                    var linkedResource = _resourceService.GetPublishedResourceByPidUri(new Uri(linkedPidUri));
-
-                    SendPublishedResource(linkedResource, priority);
+                    case ResourceCrudAction.Reindex:
+                        IndexResource(resourceIndexingDto, false, false);
+                        break;
+                    case ResourceCrudAction.Deletion:
+                        _resourceService.DeleteCachedResource(resourceIndexingDto.PidUri);
+                        DeleteResource(resourceIndexingDto, true);
+                        break;
+                    default:
+                        _resourceService.DeleteCachedResource(resourceIndexingDto.PidUri);
+                        IndexResource(resourceIndexingDto, true, true);
+                        break;
                 }
             }
-        }
-
-        /// <summary>
-        /// Send the published resource to the mq
-        /// </summary>
-        /// <param name="pidUri">Pid uri of published resource</param>
-        public void SendPublishedResourceIndex(string pidUri)
-        {
-            if (string.IsNullOrWhiteSpace(pidUri)) return;
-
-            var resource = _resourceService.GetPublishedResourceByPidUri(new Uri(pidUri));
-
-            SendPublishedResource(resource, 9);
-        }
-
-        /// <summary>
-        /// Send the published resource to the mq
-        /// </summary>
-        /// <param name="resource">Resource to be send</param>
-        /// <param name="priority">Defines the priority of the entry for the mq. High the more important</param>
-        public void SendPublishedResource(Resource resource, byte priority)
-        {
-            if (resource == null) return;
-
-            string resourceType = resource.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
-
-            var metadata = _metadataService.GetMetadataForEntityType(resourceType);
-
-            SendPublishedResource(resource, metadata, priority);
-        }
-
-        /// <summary>
-        /// Send the published resource to the mq
-        /// </summary>
-        /// <param name="resource">Resource to be send</param>
-        /// <param name="metadataProperties">Related metadata</param>
-        public void SendPublishedResource(Resource resource, IList<MetadataProperty> metadataProperties, byte priority)
-        {
-            if (resource == null || !metadataProperties.Any())
+            catch (System.Exception ex)
             {
-                _logger.LogInformation("[Indexing] Send published resource. No resource or no metatdata\nPidUri={PidUri}\nMqTopic={MQTopic}", resource?.PidUri, "TopicResourcePublished");
+                _logger.LogError(ex, "[Indexing][New Resource] An error occurred during indexing process");
+                throw;
+            }
+        }
+
+        public void IndexResourceFromTopic(string indexedResourceString)
+        {
+            _logger.LogInformation($"[Indexing] Receive indexed resource from Topic 'IndexingResources'");
+
+            Guard.ArgumentNotNullOrWhiteSpace(indexedResourceString, nameof(indexedResourceString));
+
+            try
+            {
+                _logger.LogInformation("[Indexing] Message to be index from reg service is {message}", indexedResourceString);
+                var resourceIndexingDto = JsonConvert.DeserializeObject<ResourceIndexingDTO>(indexedResourceString);
+                IndexResource(resourceIndexingDto);
+            }
+            catch (JsonSerializationException)
+            {
+                _logger.LogError("[Indexing][New Resource] An error occurred during deserialization");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Create the indexing document for the give resource.
+        /// This document is sent to the search service by the message que
+        /// </summary>
+        /// <param name="resourceIndexingDto">Resource indexing dto to be indexed</param>
+        /// <param name="updatedInboundLinks">Indicates whether resources that have outgoing connections to the current resource need to be updated . </param>
+        /// <param name="updateOutboundLinks">indicates whether linked resources of the current resource must be updated.</param>
+        private void IndexResource(ResourceIndexingDTO resourceIndexingDto, bool updatedInboundLinks, bool updateOutboundLinks)
+        {
+            string resourceType = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
+            var metadataProperties = _metadataService.GetMetadataForEntityType(resourceType);
+
+            IndexResource(resourceIndexingDto, metadataProperties);
+
+            // If a draft resource is updated or re-indexed and also has a published resource, the published resource must also be indexed. 
+            if ((resourceIndexingDto.Action == ResourceCrudAction.Update || resourceIndexingDto.Action == ResourceCrudAction.Reindex) &&
+                resourceIndexingDto.CurrentLifecycleStatus == Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft &&
+                resourceIndexingDto.RepoResources.HasPublished)
+            {
+                var linkedResource = resourceIndexingDto.RepoResources.Published;
+                var repoResources = new ResourcesCTO(resourceIndexingDto.Resource, resourceIndexingDto.RepoResources.Published, resourceIndexingDto.RepoResources.Versions);
+                var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, resourceIndexingDto.PidUri, linkedResource, repoResources);
+
+                // Links do not need to be updated, because only the information that the published entry has a draft is relevant and must be updated.
+                IndexResource(linkedResourceIndexingDto, metadataProperties);
+            }
+
+            // If a resource is published and also has a draft version, the draft version must be removed from the index.  
+            if (resourceIndexingDto.Action == ResourceCrudAction.Publish &&
+                resourceIndexingDto.RepoResources.HasDraft)
+            {
+                var linkedResource = resourceIndexingDto.RepoResources.Draft;
+                var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, resourceIndexingDto.PidUri, linkedResource, resourceIndexingDto.RepoResources);
+
+                DeleteResource(linkedResourceIndexingDto, false);
+            }
+
+            // Links must be updated in different cases, because they contain changed information of the current resource 
+            if (updatedInboundLinks || updateOutboundLinks)
+            {
+                UpdateLinks(resourceIndexingDto, metadataProperties, updatedInboundLinks, updateOutboundLinks);
+            }
+        }
+
+        private void IndexResource(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties)
+        {
+            if (resourceIndexingDto.Resource == null || !metadataProperties.Any())
+            {
+                _logger.LogInformation("[Indexing] Send published resource. No resource or no metatdata\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourcePublished");
                 return;
             }
 
             try
             {
-                var message = JsonConvert.SerializeObject(GenerateMqMessage(resource, metadataProperties), _serializerSettings);
+                var indexDocument = GenerateIndexDocument(resourceIndexingDto, metadataProperties);
+                var message = JsonConvert.SerializeObject(indexDocument, _serializerSettings);
 
-                _logger.LogInformation("[Indexing] Publish mq message for resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resource?.PidUri, "TopicResourcePublished");
-                PublishMessage(_mqOptions.Topics["TopicResourcePublished"], message, new BasicProperty() { Priority = priority });
+                _logger.LogInformation("[Indexing] Publish mq message for resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourcePublished");
+                _logger.LogInformation("[Indexing] Message to be published is {message}", message);
+                PublishMessage(_mqOptions.Topics["IndexingResourceDocument"], message, new BasicProperty() { Priority = 0 });
             }
             catch (System.Exception ex)
             {
-                _logger.LogError(ex, "[Indexing] Something went wrong while sending the resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resource?.PidUri, "TopicResourcePublished");
+                _logger.LogError(ex, "[Indexing] Something went wrong while sending the resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourcePublished");
             }
         }
 
         /// <summary>
-        /// Delete resource with given identifier in index
+        /// Deletes a resource from the corresponding index.
+        /// For draft versions the published resource is updated in addition to the links. 
         /// </summary>
-        /// <param name="pidUri">Identifier of resource to be deleted</param>
-        private void SendResourceDeleted(string pidUri)
+        /// <param name="resourceIndexingDto">Resource indexing dto to be deleted</param>
+        /// <param name="updatePublished">Determines is published should be updated</param>
+        private void DeleteResource(ResourceIndexingDTO resourceIndexingDto, bool updatePublished)
         {
-            if (string.IsNullOrWhiteSpace(pidUri)) return;
+            Guard.ArgumentNotNull(resourceIndexingDto, nameof(resourceIndexingDto));
 
             var mqMessageDict = new Dictionary<string, MessageQueuePropertyDTO>();
 
-            var resourceIdMqProperty = GenerateResourceIdMessageQueueProperty(new Uri(pidUri));
+            var resourceIdMqProperty = GenerateResourceIdMessageQueueProperty(resourceIndexingDto.PidUri);
             mqMessageDict.Add(ResourceId, resourceIdMqProperty);
 
+            // 1. Delete draft while publishing (updatePublished = false) -> update outbound
+            // 2. delete draft (updatePublished = true) -> update inbound and outbound
+            // 3. Delete published -> update inbound and outbound 
             try
             {
-                var message = JsonConvert.SerializeObject(mqMessageDict, _serializerSettings);
-                PublishMessage(_mqOptions.Topics["TopicResourceDeleted"], message, new BasicProperty() { Priority = 0 });
+                var currentLifeCycle = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
+                var indexDocument = new IndexDocumentDto(resourceIndexingDto.PidUri, ResourceCrudAction.Deletion, currentLifeCycle, mqMessageDict);
+                var message = JsonConvert.SerializeObject(indexDocument, _serializerSettings);
+
+                PublishMessage(_mqOptions.Topics["IndexingResourceDocument"], message, new BasicProperty() { Priority = 0 });
+
+                string resourceType = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
+                var metadataProperties = _metadataService.GetMetadataForEntityType(resourceType);
+
+                // If a published resource exists and the draft should be deleted, the published resource must be updated, otherwise only links will be updated
+                if (currentLifeCycle == COLID.Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft &&
+                    resourceIndexingDto.RepoResources.HasPublished)
+                {
+                    if (updatePublished)
+                    {
+                        var repoResources = new ResourcesCTO(null, resourceIndexingDto.RepoResources.Published, resourceIndexingDto.RepoResources.Versions);
+                        var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Publish, resourceIndexingDto.PidUri, resourceIndexingDto.RepoResources.Published, repoResources);
+
+                        // Update published outbound links and draft & published related inbound links
+                        IndexResource(linkedResourceIndexingDto, true, true);
+                    }
+
+                    // Update draft outbound links
+                    UpdateLinks(resourceIndexingDto, metadataProperties, false, true);
+                }
+                else
+                {
+                    UpdateLinks(resourceIndexingDto, metadataProperties, true, true);
+                }
+
             }
             catch (System.Exception ex)
             {
-                _logger.LogError(ex, "[Indexing] FAILED Deleting resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", pidUri, "TopicResourceDeleted");
+                _logger.LogError(ex, "[Indexing] FAILED Deleting resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourceDeleted");
             }
         }
 
-        private IDictionary<string, MessageQueuePropertyDTO> GenerateMqMessage(Resource resource, IList<MetadataProperty> metadataProperties)
+        /// <summary>
+        /// Aggregates all links that go out from the resource and enter the resource.
+        /// As these resources provide information, these resources are updated.
+        /// The difference is that the links of the linked resource do not need to be updated. 
+        /// </summary>
+        /// <param name="resourceIndexingDto">Indexed resource</param>
+        /// <param name="metadataProperties">Metadata of current resource to be indexed</param>
+        /// <param name="inbound">Indicates whether resources that have outgoing connections to the current resource need to be updated . </param>
+        /// <param name="outbound">indicates whether linked resources of the current resource must be updated.</param>
+        private void UpdateLinks(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties, bool inbound, bool outbound)
         {
-            _logger.LogInformation("[Indexing] Generating mq message for resource\nPidUri={PidUri}", resource.PidUri);
+            var pidUri = resourceIndexingDto.PidUri;
 
-            var mqMessageDict = GenerateMqMessage(resource as Entity, metadataProperties);
+            ISet<string> links = new HashSet<string>();
 
-            var pointsAtMqProperty = GeneratePointsAtMessageQueueProperty(resource);
-
-            if (pointsAtMqProperty != null)
+            // All linked resources, the current resource as well as the links that may have been removed are extracted.  
+            if (outbound)
             {
-                mqMessageDict.Add(Graph.Metadata.Constants.Resource.PointAt, pointsAtMqProperty);
+                links.AddRange(resourceIndexingDto.Resource.GetLinks(metadataProperties));
+
+                if (resourceIndexingDto.RepoResources.HasDraft)
+                {
+                    links.AddRange(resourceIndexingDto.RepoResources.Draft.GetLinks(metadataProperties));
+                }
+
+                if (resourceIndexingDto.RepoResources.HasPublished)
+                {
+                    links.AddRange(resourceIndexingDto.RepoResources.Published.GetLinks(metadataProperties));
+                }
             }
 
-            AddAdditionalMqProperties(resource, mqMessageDict);
+            // All resources that have a link to the current resource as well as resources in a version chain are extracted.
+            if (inbound)
+            {
+                var versionedPidUris = resourceIndexingDto.RepoResources.Versions.Select(t => t.PidUri);
 
-            _logger.LogInformation("[Indexing] Generated mq message for resource\nPidUri={PidUri}", resource.PidUri);
+                links.AddRange(versionedPidUris);
 
-            return mqMessageDict;
+                var inboundLinks = resourceIndexingDto.InboundProperties;
+                var inboundPidUris = inboundLinks.SelectMany(v => v.Value).Cast<string>().ToHashSet();
+
+                links.AddRange(inboundPidUris);
+            }
+
+            // With draft resources there is an incoming link to the published resource, so this pid uri must be removed. 
+            if (links.Contains(pidUri.ToString()))
+            {
+                links.Remove(pidUri.ToString());
+            }
+
+            // For each pid uri the resource is fetched from the triplestore and will be updated. Further links are ignored and not updated.
+            //_resourceService.DeleteCachedResource(pidUri);
+            foreach (var linkedPidUriString in links)
+            {
+                var linkedPidUri = new Uri(linkedPidUriString);
+                _resourceService.DeleteCachedResource(linkedPidUri);
+                var linkedResource = _resourceService.GetResourcesByPidUri(linkedPidUri);
+                foreach (var kvp in linkedResource.Published.InboundProperties)
+                {
+                    _logger.LogInformation("[UpdateLinks] Inbound Props for child resource are {kvp.Key} and {kvp.Value}", kvp.Key, kvp.Value);
+                }
+                var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, linkedPidUri, linkedResource.GetDraftOrPublishedVersion(), linkedResource);
+                _logger.LogInformation("[UpdateLinks] linkedPidUri to index is {linkedPidUri}", linkedPidUri);
+                _logger.LogInformation("[Indexing] Message to be index with piduri is {linkedPidUri}", linkedPidUri);
+                _logger.LogInformation("[Indexing] Message to be index from update link is {message}", JsonConvert.SerializeObject(linkedResourceIndexingDto));
+                var resourceString = JsonConvert.SerializeObject(linkedResource);
+                _logger.LogInformation("[Indexing] Message to be index from update link is {resourceString}", resourceString);
+                IndexResource(linkedResourceIndexingDto, false, false);
+            }
+        }
+
+        /// <summary>
+        /// Send the resource to the mq
+        /// </summary>
+        /// <param name="pidUriString">Pid uri of resource</param>
+        public void ReindexResource(string pidUriString)
+        {
+            _logger.LogInformation("[Reindex] Receive pid uri {pidUri} from Topic 'ReindexingResources'", pidUriString);
+
+            Guard.ArgumentNotNullOrWhiteSpace(pidUriString, nameof(pidUriString));
+
+            try
+            {
+                var pidUri = new Uri(pidUriString);
+                var resources = _resourceService.GetResourcesByPidUri(pidUri);
+                
+                var resourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Reindex, pidUri, resources.GetDraftOrPublishedVersion(), resources);
+                IndexResource(resourceIndexingDto);
+            }
+            catch (System.Exception ex)
+            {
+                _logger.LogError(ex, $"Something went wrong while reindex resource {pidUriString} by message queue");
+            }
+        }
+
+        private IndexDocumentDto GenerateIndexDocument(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties)
+        {
+            var currentLifeCycle = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
+
+            _logger.LogInformation("[Indexing] Generating mq message for resource\nPidUri={PidUri}", resourceIndexingDto.PidUri);
+
+            var linkingLevelIndexer = 0;
+            var mqMessageDict = GenerateMqMessage(resourceIndexingDto, resourceIndexingDto.Resource, metadataProperties, linkingLevelIndexer);
+
+            var inboundLinkingLevelIndexer = 0;
+            var mqMessageDictInbound = GenerateMqMessage(resourceIndexingDto, resourceIndexingDto.Resource, metadataProperties, inboundLinkingLevelIndexer, true);
+
+            CombineInboundAndOutboundProperties(mqMessageDict, mqMessageDictInbound);
+
+            AddAdditionalMqProperties(resourceIndexingDto, mqMessageDict, metadataProperties);
+
+            _logger.LogInformation("[Indexing] Generated mq message for resource\nPidUri={PidUri}", resourceIndexingDto.PidUri);
+
+            var indexDocument = new IndexDocumentDto(resourceIndexingDto.PidUri, resourceIndexingDto.Action, currentLifeCycle, mqMessageDict);
+
+            return indexDocument;
         }
 
         /// <summary>
@@ -294,35 +470,49 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resource">resource to add additional properties for</param>
         /// <param name="mqMessageDict">Dictionary with all normal resource properties</param>
-        private void AddAdditionalMqProperties(Resource resource, IDictionary<string, MessageQueuePropertyDTO> mqMessageDict)
+        private void AddAdditionalMqProperties(ResourceIndexingDTO resourceIndexingDto, IDictionary<string, MessageQueuePropertyDTO> mqMessageDict, IList<MetadataProperty> metadataProperties)
         {
-            var versionMqProperty = GenerateVersionMqProperty(resource);
+            var versionMqProperty = GenerateVersionMqProperty(resourceIndexingDto.PidUri, resourceIndexingDto);
             mqMessageDict.Add(Graph.Metadata.Constants.Resource.HasVersions, versionMqProperty);
 
-            var resourceIdMqProperty = GenerateResourceIdMessageQueueProperty(resource.PidUri);
+            var resourceIdMqProperty = GenerateResourceIdMessageQueueProperty(resourceIndexingDto.PidUri);
             mqMessageDict.Add(ResourceId, resourceIdMqProperty);
 
-            var internalResourceIdMqProperty = GenerateInternalResourceIdMessageQueueProperty(resource);
+            var internalResourceIdMqProperty = GenerateInternalResourceIdMessageQueueProperty(resourceIndexingDto.Resource);
             mqMessageDict.Add(InternalResourceId, internalResourceIdMqProperty);
 
-            var internalResourceHashMqProperty = GenerateResourceHashMessageQueueProperty(resource);
+            var internalResourceHashMqProperty = GenerateResourceHashMessageQueueProperty(resourceIndexingDto.Resource, mqMessageDict, metadataProperties);
             mqMessageDict.Add(ResourceHash, internalResourceHashMqProperty);
+
+            if (GeneratePointsAtMessageQueueProperty(resourceIndexingDto.Resource, out var pointsAtMqProperty))
+            {
+                mqMessageDict.Add(Graph.Metadata.Constants.Resource.PointAt, pointsAtMqProperty);
+            }
+
+            if (GenerateResourceLinkedEntryLifeCycleMessageQueueProperty(resourceIndexingDto, out var lifecycleStatusMqProperty))
+            {
+                mqMessageDict.Add(ResourceLinkedLifecycleStatus, lifecycleStatusMqProperty);
+            }
         }
+
+        #region Additional Mq Properties
 
         /// <summary>
         /// Generates an mq property for the versions. all previous versions are stored as inbound values and all older versions are stored as outbound values.
         /// </summary>
         /// <param name="resource">The resource from the version chain that is to be updated</param>
         /// <returns>Returns an mq property for the versions chain</returns>
-        private static MessageQueuePropertyDTO GenerateVersionMqProperty(Resource resource)
+        private MessageQueuePropertyDTO GenerateVersionMqProperty(Uri pidUri, ResourceIndexingDTO resourceIndexingDto)
         {
-            string actualVersion = resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasVersion, true);
+            var versions = resourceIndexingDto.RepoResources.Versions;
+            string actualVersion = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasVersion, true);
 
             var messageQueueProperty = new MessageQueuePropertyDTO();
 
-            foreach (var version in resource.Versions)
+            foreach (var version in versions)
             {
-                if (!CheckVersionHasPublishedVersion(version))
+                // TODO: Not for save action
+                if (resourceIndexingDto.CurrentLifecycleStatus != Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft && !CheckVersionHasPublishedVersion(version))
                 {
                     continue;
                 }
@@ -373,16 +563,18 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resource">The resource used to generate the property</param>
         /// <returns>Returns an mq property</returns>
-        private static MessageQueuePropertyDTO GeneratePointsAtMessageQueueProperty(Resource resource)
+        private static bool GeneratePointsAtMessageQueueProperty(Entity resource, out MessageQueuePropertyDTO mqProperty)
         {
             Entity mainDistribution = resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.MainDistribution, true);
             if (mainDistribution != null)
             {
                 var propertyDTO = new MessageQueueDirectionPropertyDTO(null, mainDistribution.Id, Graph.Metadata.Constants.Resource.PointAt);
-                return new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO>() { propertyDTO } };
+                mqProperty = new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO>() { propertyDTO } };
+                return true;
             }
 
-            return null;
+            mqProperty = null;
+            return false;
         }
 
         /// <summary>
@@ -400,7 +592,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resource">The resource used to generate the property</param>
         /// <returns>Returns an mq property</returns>
-        private static MessageQueuePropertyDTO GenerateInternalResourceIdMessageQueueProperty(Resource resource)
+        private static MessageQueuePropertyDTO GenerateInternalResourceIdMessageQueueProperty(Entity resource)
         {
             return new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO>() { new MessageQueueDirectionPropertyDTO(null, resource.Id) } };
         }
@@ -410,11 +602,69 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resource">The resource used to generate the hash</param>
         /// <returns>Returns an mq property</returns>
-        private MessageQueuePropertyDTO GenerateResourceHashMessageQueueProperty(Resource resource)
+        private MessageQueuePropertyDTO GenerateResourceHashMessageQueueProperty(Entity resource, IDictionary<string, MessageQueuePropertyDTO> mqMessageDict, IList<MetadataProperty> metadataProperties)
         {
-            var sha512Hash = _hasher.Hash(resource);
-            return new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO> { new MessageQueueDirectionPropertyDTO(sha512Hash, null) } };
+            IEnumerable<dynamic> keywordLabels = new List<dynamic>();
+
+            foreach (var metadataProperty in metadataProperties)
+            {
+                if (metadataProperty.IsControlledVocabulary(out var range) && metadataProperty.Properties.TryGetValue(COLID.Graph.Metadata.Constants.PIDO.Shacl.FieldType, out var fieldType))
+                {
+                    if (fieldType == COLID.Graph.Metadata.Constants.PIDO.Shacl.FieldTypes.ExtendableList)
+                    {
+                        if (mqMessageDict.TryGetValue(metadataProperty.Key, out var value))
+                        {
+                            keywordLabels = value.Outbound.Select(t => t.Value);
+                        }
+                    }
+                }
+            }
+
+            var resourceCopy = resource;
+
+            if (keywordLabels != null && keywordLabels.Any())
+            {
+                resourceCopy = new Entity { Id = resource.Id, InboundProperties = resource.InboundProperties, Properties = resource.Properties };
+                resourceCopy.Properties[Graph.Metadata.Constants.Resource.Keyword] = keywordLabels.ToList();
+            }
+
+            var sha256Hash = _hasher.Hash(resourceCopy);
+
+            return new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO> { new MessageQueueDirectionPropertyDTO(sha256Hash, null) } };
         }
+
+        /// <summary>
+        /// Generates a mq property to define if a resource with antoher lifecycle status exists..
+        /// </summary>
+        /// <param name="resource">The resource used to be checked</param>
+        /// <returns>Returns an mq property</returns>
+        private bool GenerateResourceLinkedEntryLifeCycleMessageQueueProperty(ResourceIndexingDTO resourceIndexingDto, out MessageQueuePropertyDTO mqProperty)
+        {
+            var currentLifeCycle = resourceIndexingDto.CurrentLifecycleStatus;
+
+            if (currentLifeCycle == COLID.Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft && resourceIndexingDto.RepoResources.HasPublished)
+            {
+                var publishedResourceStatus =
+                    resourceIndexingDto.RepoResources.Published.Properties.GetValueOrNull(
+                        COLID.Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
+                mqProperty = new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO> { new MessageQueueDirectionPropertyDTO(null, publishedResourceStatus) } };
+                return true;
+            }
+
+            if (currentLifeCycle != COLID.Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft && resourceIndexingDto.RepoResources.HasDraft && resourceIndexingDto.Action != ResourceCrudAction.Publish)
+            {
+                var draftResourceStatus =
+                    resourceIndexingDto.RepoResources.Draft.Properties.GetValueOrNull(
+                        COLID.Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
+                mqProperty = new MessageQueuePropertyDTO() { Outbound = new List<MessageQueueDirectionPropertyDTO> { new MessageQueueDirectionPropertyDTO(null, draftResourceStatus) } };
+                return true;
+            }
+
+            mqProperty = null;
+            return false;
+        }
+
+        #endregion
 
         /// <summary>
         /// Adds the inbound left to the outbounds left so that all left are clustered into a key.
@@ -436,27 +686,14 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             }
         }
 
-        private IDictionary<string, MessageQueuePropertyDTO> GenerateMqMessage(Entity entity, IList<MetadataProperty> metadataProperties)
-        {
-            var linkingLevelIndexer = 0;
-            var mqMessageDict = GenerateMqMessage(entity, metadataProperties, linkingLevelIndexer);
-
-            var inboundLinkingLevelIndexer = 0;
-            var mqMessageDictInbound = GenerateMqMessage(entity, metadataProperties, inboundLinkingLevelIndexer, true);
-
-            CombineInboundAndOutboundProperties(mqMessageDict, mqMessageDictInbound);
-
-            return mqMessageDict;
-        }
-
-        private IDictionary<string, MessageQueuePropertyDTO> GenerateMqMessage(Entity entity, IList<MetadataProperty> metadataProperties, int linkingLevelIndexer, bool inbound = false)
+        private IDictionary<string, MessageQueuePropertyDTO> GenerateMqMessage(ResourceIndexingDTO resourceIndexingDto, Entity entity, IList<MetadataProperty> metadataProperties, int linkingLevelIndexer, bool inbound = false)
         {
             var mqMessageDict = new Dictionary<string, MessageQueuePropertyDTO>();
 
             IDictionary<string, List<dynamic>> resourceProperties;
             if (inbound)
             {
-                resourceProperties = entity.InboundProperties;
+                resourceProperties = resourceIndexingDto.InboundProperties;
             }
             else
             {
@@ -473,28 +710,41 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 var metadataProperty = metadataProperties.FirstOrDefault(metaProp => metaProp.Properties.GetValueOrNull(Graph.Metadata.Constants.EnterpriseCore.PidUri, true) == propertyItem.Key);
 
                 // Main distribution is an ignored property, but must be handled separately at this point, as it is written to the index as a normal endpoint.
-                if (IsIgnoredMetadataProperty(metadataProperty, inbound) && Graph.Metadata.Constants.Resource.MainDistribution != metadataProperty?.Key)
+                if (IsIgnoredMetadataProperty(propertyItem.Key, metadataProperty, inbound) && Graph.Metadata.Constants.Resource.MainDistribution != metadataProperty?.Key)
                 {
                     continue;
                 }
 
                 foreach (var property in propertyItem.Value)
                 {
+                    if (property == null)
+                    {
+                        continue;
+                    }
+
                     var newLinkingLevelIndexer = linkingLevelIndexer;
 
-                    // in some cases, the inbound type may not be the same as the current entity type, missing metadata must be loaded
-                    if (metadataProperty == null && inbound && property is Entity)
-                    {
-                        var inboundEntity = property as Entity;
-                        var inboundEntityType = inboundEntity.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
+                    Entity inboundEntity = null;
 
-                        IList<MetadataProperty> newMetadataProperties = _metadataService.GetMetadataForEntityType(inboundEntityType);
-                        metadataProperty = newMetadataProperties?.FirstOrDefault(metaProp => metaProp.Properties.GetValueOrNull(Graph.Metadata.Constants.EnterpriseCore.PidUri, true) == propertyItem.Key);
+                    // in some cases, the inbound type may not be the same as the current entity type, missing metadata must be loaded
+                    if (metadataProperty == null && inbound)
+                    {
+                        inboundEntity = GetLinkedResource(resourceIndexingDto, property);
+
+                        if (inboundEntity != null)
+                        {
+                            var inboundEntityType = inboundEntity.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
+
+                            IList<MetadataProperty> newMetadataProperties = _metadataService.GetMetadataForEntityType(inboundEntityType);
+                            metadataProperty = newMetadataProperties?.FirstOrDefault(metaProp => metaProp.Properties.GetValueOrNull(Graph.Metadata.Constants.EnterpriseCore.PidUri, true) == propertyItem.Key);
+                        }
                     }
+
+                    var propertyValue = inboundEntity ?? property;
 
                     if (metadataProperty != null)
                     {
-                        var mqProperty = GenerateMqDirectionProperty(propertyItem.Key, property, metadataProperty, newLinkingLevelIndexer);
+                        var mqProperty = GenerateMqDirectionProperty(resourceIndexingDto, propertyItem.Key, propertyValue, metadataProperty, newLinkingLevelIndexer);
 
                         if (mqProperty != null)
                         {
@@ -539,17 +789,29 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             return mqMessageDict;
         }
 
-        private MessageQueueDirectionPropertyDTO GenerateMqDirectionProperty(string propertyKey, dynamic propertyValue, MetadataProperty metadataProperty, int linkingLevelIndexer)
+        private MessageQueueDirectionPropertyDTO GenerateMqDirectionProperty(ResourceIndexingDTO resourceIndexingDto, string propertyKey, dynamic propertyValue, MetadataProperty metadataProperty, int linkingLevelIndexer)
         {
             var metadataGroup = metadataProperty.GetMetadataPropertyGroup();
 
-            if (propertyValue is Entity)
+            if (metadataGroup?.Key == Graph.Metadata.Constants.Resource.Groups.LinkTypes && propertyValue != null && !DynamicExtension.IsType<Entity>(propertyValue, out Entity linkedEntity))
+            {
+                linkedEntity = GetLinkedResource(resourceIndexingDto, propertyValue);
+
+                if (linkedEntity != null)
+                {
+                    propertyValue = linkedEntity;
+                }
+            }
+
+
+            if (DynamicExtension.IsType<Entity>(propertyValue, out Entity nestedEntity))
             {
                 linkingLevelIndexer++;
 
-                var nestedEntity = propertyValue as Entity;
+                string pidUri = nestedEntity.GetType().GetProperty("PidUri") == null ? nestedEntity.Id :
+                   ((System.Uri)nestedEntity.GetType().GetProperty("PidUri").GetValue(nestedEntity, null)).AbsoluteUri;
 
-                var mqProperty = new MessageQueueDirectionPropertyDTO(nestedEntity.Id, nestedEntity.Id, propertyKey);
+                var mqProperty = new MessageQueueDirectionPropertyDTO(nestedEntity.Id, pidUri, propertyKey);
 
                 string typeOfNestedEntity = nestedEntity.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
                 if (typeOfNestedEntity == null || string.IsNullOrWhiteSpace(typeOfNestedEntity))
@@ -565,7 +827,10 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
                 var entryLifeCycleStatus = nestedEntity.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
 
-                if (!string.IsNullOrWhiteSpace(entryLifeCycleStatus) &&
+                var removeLinkedDraftResources = resourceIndexingDto.CurrentLifecycleStatus !=
+                                                                        COLID.Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft;
+
+                if (removeLinkedDraftResources && !string.IsNullOrWhiteSpace(entryLifeCycleStatus) &&
                     entryLifeCycleStatus == Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft)
                 {
                     return null;
@@ -586,33 +851,66 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 }
                 else
                 {
-                    mqProperty.Value = GenerateMqMessage(nestedEntity, metadataForNestedEntityType.Properties, linkingLevelIndexer);
+                    mqProperty.Value = GenerateMqMessage(resourceIndexingDto, nestedEntity, metadataForNestedEntityType.Properties, linkingLevelIndexer);
                 }
 
                 return mqProperty;
             }
-            else if (metadataGroup?.Key == Graph.Metadata.Constants.Resource.Groups.LinkTypes)
+            else if (propertyValue is DateTime)
             {
-                return null;
+                return new MessageQueueDirectionPropertyDTO(propertyValue.ToString("o", DateTimeFormatInfo.InvariantInfo), null);
             }
             else if (metadataProperty.IsControlledVocabulary(out var range) || propertyKey == Graph.Metadata.Constants.RDF.Type)
             {
                 var id = propertyValue as string;
 
-                var entity = _entityService.GetEntity(id);
-
-                if (entity == null)
+                try
                 {
-                    _logger.LogWarning($"Unable to map CV for property with key={propertyKey} and value={propertyValue}.");
+                    var entity = _entityService.GetEntity(id);
+
+                    if (entity == null)
+                    {
+                        _logger.LogWarning(
+                            $"Unable to map CV for property with key={propertyKey} and value={propertyValue}.");
+                        return null;
+                    }
+
+                    return new MessageQueueDirectionPropertyDTO(entity.Name, id);
+                }
+                catch (System.Exception exception)
+                {
+                    _logger.LogError(exception,
+                        $"Unable to receive entity for property with key={propertyKey} and value={propertyValue}.");
                     return null;
                 }
-
-                return new MessageQueueDirectionPropertyDTO(entity.Name, id);
+                
             }
             else
             {
-                return new MessageQueueDirectionPropertyDTO(propertyValue as string, null);
+                return new MessageQueueDirectionPropertyDTO(Convert.ToString(propertyValue), null);
             }
+        }
+
+        private Entity GetLinkedResource(ResourceIndexingDTO resourceIndexingDto, dynamic value)
+        {
+            Uri linkedPidURi = null;
+
+            if (Uri.TryCreate(value, UriKind.Absolute, out linkedPidURi))
+            {
+                var resources = _resourceService.GetResourcesByPidUri(linkedPidURi);
+
+                if (resources != null && resources.HasPublishedOrDraft)
+                {
+                    var inboundEntity =
+                        resourceIndexingDto.CurrentLifecycleStatus == COLID.Graph.Metadata.Constants.Resource
+                            .ColidEntryLifecycleStatus.Draft
+                            ? resources.GetDraftOrPublishedVersion()
+                            : resources.GetPublishedOrDraftVersion();
+                    return inboundEntity;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -641,12 +939,12 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                         var registrationServiceGetTaxonomyListUrl = $"{_configuration.GetConnectionString("colidRegistrationServiceUrl")}/api/v3/taxonomyList?taxonomyType={encodedRange}";
 
                         var accessToken = await _registrationServiceTokenService.GetAccessTokenForWebApiAsync();
-                        var response = await httpClient.SendRequestWithBearerTokenAsync(HttpMethod.Get, registrationServiceGetTaxonomyListUrl,
-                            null, accessToken, _cancellationToken);
+                        var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Get, registrationServiceGetTaxonomyListUrl,
+                            null, accessToken, _cancellationToken, _correlationContext.CorrelationContext);
 
                         if (!response.IsSuccessStatusCode)
                         {
-                            _logger.LogError("[Reindexing] Something went wrong while getting taxonomy\nresponse={response}", response);
+                            _logger.LogError("[Reindexing] Something went wrong while getting taxonomy, response={response}", response);
                             throw new System.Exception("Something went wrong while getting taxonomy");
                         }
 
@@ -665,13 +963,13 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 foreach (var nestedMetadata in metadataProperty.NestedMetadata)
                 {
                     nestedMetadata.Properties = nestedMetadata.Properties
-                        .Where(prop => !IsIgnoredMetadataProperty(prop)).ToList();
+                        .Where(prop => !IsIgnoredMetadataProperty(prop.Key, prop)).ToList();
                 }
 
                 return metadataProperty;
             })
                 .Select(t => t.Result)
-                .Where(prop => !IsIgnoredMetadataProperty(prop))
+                .Where(prop => !IsIgnoredMetadataProperty(prop.Key, prop))
                 .ToDictionary(metaProp => (string)metaProp.Properties[Graph.Metadata.Constants.EnterpriseCore.PidUri], metaProp => metaProp);
 
             _logger.LogInformation("[Indexing] Created metadata mapping for all entity types");
@@ -679,9 +977,19 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             return metadataDict;
         }
 
-        private static bool IsIgnoredMetadataProperty(MetadataProperty metadataProperty, bool inboundProperty = false)
+        private static bool IsIgnoredMetadataProperty(string propertyKey, MetadataProperty metadataProperty, bool inboundProperty = false)
         {
-            if (metadataProperty == null || Graph.Metadata.Constants.Resource.MainDistribution == metadataProperty.Key)
+            switch (propertyKey)
+            {
+                case Graph.Metadata.Constants.Resource.HasPidEntryDraft:
+                    return true;
+                case Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus:
+                    return false;
+                case Graph.Metadata.Constants.Resource.MainDistribution:
+                    return true;
+            }
+
+            if (metadataProperty == null)
             {
                 return !inboundProperty;
             }

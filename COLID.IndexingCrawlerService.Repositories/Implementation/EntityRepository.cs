@@ -18,11 +18,10 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
 
         private IEnumerable<string> QueryGraphs => new List<string>() {
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasMetadataGraph,
-            Graph.Metadata.Constants.MetadataGraphConfiguration.HasECOGraph,
-            Graph.Metadata.Constants.MetadataGraphConfiguration.HasShaclConstraintsGraph,
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasConsumerGroupGraph,
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasPidUriTemplatesGraph,
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasKeywordsGraph,
+            Graph.Metadata.Constants.MetadataGraphConfiguration.HasInstanceGraph,
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasExtendedUriTemplateGraph
         };
 

@@ -1,6 +1,9 @@
-﻿using COLID.Graph;
+﻿using COLID.Common.Logger;
+using COLID.Graph;
 using COLID.IndexingCrawlerService.Services;
 using COLID.MessageQueue;
+using CorrelationId;
+using CorrelationId.DependencyInjection;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -31,6 +34,8 @@ namespace COLID.IndexingCrawlerService.WebApi
         /// <param name="services"></param>
         public void ConfigureServices(IServiceCollection services)
         {
+            services.AddDefaultCorrelationId();
+            services.AddCorrelationIdLogger();
             services.AddCors();
             services.AddHttpContextAccessor();
             services.AddHttpClient();
@@ -50,8 +55,9 @@ namespace COLID.IndexingCrawlerService.WebApi
         /// </summary>
         /// <param name="app"></param>
         /// <param name="env"></param>
-        public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+        public void Configure(IApplicationBuilder app)
         {
+            app.UseCorrelationId();
             app.UseHttpsRedirection();
 
             app.UseRouting();

@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 using COLID.Common.Enums;
+using COLID.Common.Extensions;
 using COLID.Graph.Metadata.Constants;
 using COLID.Graph.Metadata.DataModels.Metadata;
 using COLID.Graph.Metadata.Extensions;
@@ -31,6 +32,16 @@ namespace COLID.IndexingCrawlerService.Services.Extensions
                 else if (facetAlways)
                 {
                     metadataProperty.Properties.AddOrUpdate(Resource.IsFacet, FacetType.Always);
+                }
+
+                if (metadataProperty.NestedMetadata.IsNullOrEmpty())
+                {
+                    continue;
+                }
+
+                foreach (var metadata in metadataProperty.NestedMetadata)
+                {
+                    metadata.Properties.ModifyPropertiesForElastic();
                 }
             }
 
@@ -102,9 +113,9 @@ namespace COLID.IndexingCrawlerService.Services.Extensions
             {
                 EnterpriseCore.PidUri,
                 Resource.BaseUri,
-                Resource.HasEntryLifecycleStatus,
                 Resource.HasHistoricVersion,
-                Resource.MetadataGraphConfiguration
+                Resource.MetadataGraphConfiguration,
+                Resource.HasEntryLifecycleStatus
             };
 
             return facetExcludePaths.Contains(property.Key);

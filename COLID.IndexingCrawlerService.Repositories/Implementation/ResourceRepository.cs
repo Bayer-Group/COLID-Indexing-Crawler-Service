@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using COLID.Exception.Models.Business;
 using COLID.IndexingCrawlerService.Repositories.Interface;
 using VDS.RDF.Query;
 using COLID.Graph.TripleStore.Extensions;
@@ -9,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using COLID.Graph.Metadata.Repositories;
 using COLID.Graph.Metadata.DataModels.Resources;
 using COLID.Graph.TripleStore.DataModels.Base;
+using COLID.RegistrationService.Common.DataModel.Resources;
 
 namespace COLID.IndexingCrawlerService.Repositories.Implementation
 {
@@ -62,7 +66,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             return false;
         }
 
-        public IList<Uri> GetAllPublishedPidUris()
+        public IList<Uri> GetAllPidUris()
         {
             var parameterizedString = new SparqlParameterizedString
             {
@@ -72,68 +76,114 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                       @fromMetadataNamedGraph
                       WHERE {
                               ?subject rdf:type  [rdfs:subClassOf* @firstResourceType].
-                              Values ?lifecycleStatus { @markedLifecycleStatus @publishedLifecycleStatus }
-                              ?subject  @hasLifecycleStatus ?lifecycleStatus.
                               ?subject  @hasPid ?pidUri. 
+                              FILTER NOT EXISTS { ?subject  @hasPidEntryDraft ?draftResource. }.
                             }"
             };
 
             parameterizedString.SetPlainLiteral("fromResourceNamedGraph", _metadataGraphConfigurationRepository.GetGraphs(InsertingGraph).JoinAsFromNamedGraphs());
             parameterizedString.SetPlainLiteral("fromMetadataNamedGraph", _metadataGraphConfigurationRepository.GetGraphs(Graph.Metadata.Constants.MetadataGraphConfiguration.HasMetadataGraph).JoinAsFromNamedGraphs());
             parameterizedString.SetUri("firstResourceType", new Uri(Graph.Metadata.Constants.Resource.Type.FirstResouceType));
-            parameterizedString.SetUri("hasLifecycleStatus", new Uri(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus));
+            parameterizedString.SetUri("hasPidEntryDraft", new Uri(Graph.Metadata.Constants.Resource.HasPidEntryDraft));
             parameterizedString.SetUri("hasPid", new Uri(Graph.Metadata.Constants.EnterpriseCore.PidUri));
-
-            parameterizedString.SetUri("markedLifecycleStatus", new Uri(Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.MarkedForDeletion));
-            parameterizedString.SetUri("publishedLifecycleStatus", new Uri(Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Published));
 
             var results = _tripleStoreRepository.QueryTripleStoreResultSet(parameterizedString);
 
             return results.Select(result => new Uri(result.GetNodeValuesFromSparqlResult("pidUri").Value)).ToList();
         }
 
-        public Resource GetPublishedResourceByPidUri(Uri pidUri)
+        public ResourcesCTO GetResourcesByPidUri(Uri pidUri, IList<string> resourceTypes)
         {
-            var parameterizedString = new SparqlParameterizedString
+            SparqlParameterizedString parameterizedString = new SparqlParameterizedString
             {
                 CommandText =
-                    @"PREFIX : <> SELECT DISTINCT ?subject ?object ?predicate ?object_ ?publishedVersion ?inboundPredicate ?inbound
-                      @fromResourceNamedGraph
-                      WHERE {
-                          ?subject @hasPid @pidUri.
-                          ?subject rdf:type ?resourceType.
-                          Values ?lifecycleStatus { @markedLifecycleStatus @publishedLifecycleStatus }
-                          ?subject  @hasLifecycleStatus ?lifecycleStatus.
-                          {
-                              ?subject ?predicate ?object_.
-                              BIND(?subject as ?object).
-                              OPTIONAL { ?publishedVersion @hasPidEntryDraft ?subject }
-                          } UNION {
-                              ?subject (:| !:)+ ?object.
-                              ?object ?predicate ?object_.
-                              Filter NOT EXISTS { ?draftResource @hasPidEntryDraft ?object}
-                          } UNION {
-                              ?object ?inboundPredicate ?subject.
-                              ?object ?predicate ?object_.
-                              BIND(@true as ?inbound).
-                              Filter NOT EXISTS { ?draftResource @hasPidEntryDraft ?object}
-                        }
+               @"SELECT DISTINCT ?subject ?object ?predicate ?object_ ?publishedVersion ?objectPidUri ?inbound ?inboundPredicate ?inboundPidUri
+                  @fromResourceNamedGraph
+                  WHERE { {
+                     ?subject @hasPid @pidUri.
+                     BIND(?subject as ?object).
+                     ?subject ?predicate ?object_.
+                     OPTIONAL { ?publishedVersion @hasPidEntryDraft ?subject }
+                     OPTIONAL { ?object_ @hasPid ?objectPidUri. }
+                  } UNION {
+                    ?subject @hasPid @pidUri.
+                    ?subject (rdf:| !rdf:)+ ?object.
+                    ?object rdf:type ?objectType.
+                    FILTER (?objectType NOT IN ( @resourceTypes ) )
+                    ?object ?predicate ?object_.
+                    }
+                    UNION {
+                    ?subject @hasPid @pidUri.
+                    ?object ?inboundPredicate ?subject.
+                    ?object @hasPid ?inboundPidUri.
+                    BIND(@true as ?inbound).
+                    Filter NOT EXISTS { ?draftResource @hasPidEntryDraft ?object}
+                    }
                     }"
             };
 
-            parameterizedString.SetPlainLiteral("fromResourceNamedGraph", _metadataGraphConfigurationRepository.GetGraphs(InsertingGraph).JoinAsFromNamedGraphs());
-            parameterizedString.SetUri("hasLifecycleStatus", new Uri(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus));
-            parameterizedString.SetUri("hasPidEntryDraft", new Uri(Graph.Metadata.Constants.Resource.HasPidEntryDraft));
-            parameterizedString.SetLiteral("true", Graph.Metadata.Constants.Boolean.True);
+            parameterizedString.SetPlainLiteral("fromResourceNamedGraph", _metadataGraphConfigurationRepository.GetGraphs(QueryGraphs).JoinAsFromNamedGraphs());
             parameterizedString.SetUri("hasPid", new Uri(Graph.Metadata.Constants.EnterpriseCore.PidUri));
             parameterizedString.SetUri("pidUri", pidUri);
+            parameterizedString.SetUri("hasPidEntryDraft", new Uri(Graph.Metadata.Constants.Resource.HasPidEntryDraft));
+            parameterizedString.SetPlainLiteral("resourceTypes", resourceTypes.JoinAsGraphsList());
+            parameterizedString.SetLiteral("true", Graph.Metadata.Constants.Boolean.True);
 
-            parameterizedString.SetUri("markedLifecycleStatus", new Uri(Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.MarkedForDeletion));
-            parameterizedString.SetUri("publishedLifecycleStatus", new Uri(Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Published));
+            var resources = BuildResourceFromQuery(parameterizedString, pidUri);
 
-            var results = _tripleStoreRepository.QueryTripleStoreResultSet(parameterizedString);
+            var resourceDraft = resources.FirstOrDefault(r =>
+                r.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true) == Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Draft); // firstResource
+            var resourcePublished = resources.FirstOrDefault(r =>
+            {
+                var lifecycleStatus =
+                    r.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
 
-            return results.IsEmpty ? null : TransformQueryResults(results, pidUri.ToString()).FirstOrDefault();
+                return lifecycleStatus == Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.Published ||
+                       lifecycleStatus == Graph.Metadata.Constants.Resource.ColidEntryLifecycleStatus.MarkedForDeletion;
+            });
+
+            IList<VersionOverviewCTO> versions = new List<VersionOverviewCTO>();
+            if (resourceDraft != null || resourcePublished != null)
+            {
+                versions = resourceDraft == null ? resourcePublished.Versions : resourceDraft.Versions;
+            }
+
+            ResourcesCTO resourcesCTO = new ResourcesCTO(resourceDraft, resourcePublished, versions);
+
+            return resourcesCTO;
+        }
+
+        private IList<Resource> BuildResourceFromQuery(SparqlParameterizedString parameterizedString, Uri pidUri = null)
+        {
+            using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(100));
+
+            var resultsTask = Task.Factory.StartNew(() => _tripleStoreRepository.QueryTripleStoreResultSet(parameterizedString), cancellationTokenSource.Token);
+            var versionsTask = Task.Factory.StartNew(() => GetAllVersionsOfResourceByPidUri(pidUri), cancellationTokenSource.Token);
+
+            WaitAllTasks(cancellationTokenSource, resultsTask, versionsTask);
+
+            SparqlResultSet results = resultsTask.Result;
+            IList<VersionOverviewCTO> versions = versionsTask.Result;
+
+            if (!results.Any())
+            {
+                throw new EntityNotFoundException("No resource found for given pid uri", pidUri.ToString());
+            }
+
+            var entities = TransformQueryResults(results, pidUri?.ToString());
+
+            foreach (var entity in entities)
+            {
+                entity.Versions = versions;
+            }
+
+            return entities;
+        }
+
+        private void WaitAllTasks(CancellationTokenSource cancellationTokenSource, params Task[] tasks)
+        {
+            // OperationCanceledException will be thrown if time of token expired
+            Task.WaitAll(tasks, cancellationTokenSource.Token);
         }
 
         private IList<Resource> TransformQueryResults(SparqlResultSet results, string id = "")
@@ -202,8 +252,8 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                         }
 
                         return value;
-                    }).ToList(); ;
-                }); ;
+                    }).Distinct().ToList();
+                });
         }
 
         private IDictionary<string, List<dynamic>> GetInboundEntityPropertiesFromSparqlResultByList(IGrouping<string, SparqlResult> sparqlResults, int counter)
@@ -217,24 +267,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
 
             return groupedResults.ToDictionary(
                 res => res.FirstOrDefault().GetNodeValuesFromSparqlResult("inboundPredicate").Value,
-                res =>
-                {
-                    var subGroupedResults = res.GroupBy(t => t.GetNodeValuesFromSparqlResult("object").Value);
-
-                    return subGroupedResults.Select(subRes =>
-                    {
-                        var key = subRes.FirstOrDefault().GetNodeValuesFromSparqlResult("inboundPredicate").Value;
-                        var valueProperty = subRes.Key;
-
-                        var value = new Entity()
-                        {
-                            Id = valueProperty,
-                            Properties = GetEntityPropertiesFromSparqlResultByList(subRes, valueProperty, counter)
-                        };
-
-                        return (dynamic)value;
-                    }).ToList();
-                });
+                res => res.Select(t => t.GetNodeValuesFromSparqlResult("inboundPidUri")?.Value).Distinct().Cast<dynamic>().ToList());
         }
 
         public IList<VersionOverviewCTO> GetAllVersionsOfResourceByPidUri(Uri pidUri)

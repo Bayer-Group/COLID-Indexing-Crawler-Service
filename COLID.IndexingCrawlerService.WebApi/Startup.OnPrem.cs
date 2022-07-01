@@ -33,7 +33,7 @@ namespace COLID.IndexingCrawlerService.WebApi
         /// </summary>
         /// <param name="app">The application builder</param>
         /// <param name="env">The environment</param>
-        public void ConfigureOnPrem(IApplicationBuilder app, IWebHostEnvironment env)
+        public void ConfigureOnPrem(IApplicationBuilder app)
         {
             app.UseDeveloperExceptionPage();
 
@@ -43,7 +43,7 @@ namespace COLID.IndexingCrawlerService.WebApi
             // See https://docs.microsoft.com/en-us/dotnet/api/system.net.http.socketshttphandler?view=netcore-3.1#remarks
             AppContext.SetSwitch("System.Net.Http.UseSocketsHttpHandler", false);
 
-            Configure(app, env);
+            Configure(app);
         }
     }
 }

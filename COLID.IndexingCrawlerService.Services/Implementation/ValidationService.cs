@@ -24,7 +24,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             throw new System.NotImplementedException();
         }
 
-        public Task<ValidationResult> ValidateEntity(Entity entity, IList<MetadataProperty> metadataProperties, bool markedResultsAsCritical = false)
+        public Task<ValidationResult> ValidateEntity(Entity entity, IList<MetadataProperty> metadataProperties)
         {
             throw new System.NotImplementedException();
         }
