@@ -16,7 +16,8 @@ namespace COLID.IndexingCrawlerService.Services.Interface
         /// Generates the generic entity, identified by the given id.
         /// </summary>
         /// <param name="id">the id to search for</param>
+        /// <param name="propertyKey">the key of id to search for</param>
         /// <returns>the found entity, otherwise null</returns>
-        BaseEntityResultDTO GetEntity(string id);
+        BaseEntityResultDTO GetEntity(string id, string propertyKey);
     }
 }

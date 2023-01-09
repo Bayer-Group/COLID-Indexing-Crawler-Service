@@ -19,12 +19,27 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             throw new System.NotImplementedException();
         }
 
+        public bool CheckPropertyIsMandatory(string Property, IList<MetadataProperty> metadata)
+        {
+            throw new System.NotImplementedException();
+        }
+
         public void CheckType<TEntity>(TEntity entity) where TEntity : EntityBase
         {
             throw new System.NotImplementedException();
         }
 
         public Task<ValidationResult> ValidateEntity(Entity entity, IList<MetadataProperty> metadataProperties)
+        {
+            throw new System.NotImplementedException();
+        }
+
+        public Task<ValidationResult> ValidateEntity(Entity entity, IList<MetadataProperty> metadataProperties, bool ignoreInvalidProperties = false)
+        {
+            throw new System.NotImplementedException();
+        }
+
+        public Task<ValidationResult> ValidateEntity(List<Entity> entities, IList<MetadataProperty> metadataProperties)
         {
             throw new System.NotImplementedException();
         }

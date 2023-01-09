@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Linq;
 using AutoMapper;
 using COLID.Common.Extensions;
@@ -23,9 +23,9 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             _mapper = mapper;
         }
 
-        public BaseEntityResultDTO GetEntity(string identifier)
+        public BaseEntityResultDTO GetEntity(string identifier, string propertyKey)
         {
-            var entity = _entityRepository.GetEntityById(identifier);
+            var entity = _entityRepository.GetEntityById(identifier, propertyKey);
 
             return entity == null ? null : _mapper.Map<BaseEntityResultDTO>(entity);
         }

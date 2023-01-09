@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -866,7 +866,11 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
                 try
                 {
-                    var entity = _entityService.GetEntity(id);
+                    // we fetch and send the class name for the dynamic graphs selection for taxonomies zB CountryRegions https://pid.bayer.com/kos/19050/CountryRegions
+                    // the class name of the concept is same as the metadata class name 
+                    // thus we are sending class name "taxonomyKeyClass" explicitly to verify the metadata config and fetch eligible graphs
+                    var taxonomyKeyClass = metadataProperty.Properties.GetValueOrNull(COLID.Graph.Metadata.Constants.Shacl.Class, false);
+                    var entity = _entityService.GetEntity(id, taxonomyKeyClass);
 
                     if (entity == null)
                     {

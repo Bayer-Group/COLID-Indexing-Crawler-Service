@@ -5,7 +5,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Interface
 {
     public interface IEntityRepository
     {
-        Entity GetEntityById(string id);
+        Entity GetEntityById(string id, string propertyKey);
 
         IList<Entity> GetEntities(string type);
     }
