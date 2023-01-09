@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using COLID.Graph.Metadata.Repositories;
@@ -89,9 +89,24 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             return parameterizedString;
         }
 
-        public Entity GetEntityById(string id)
+        public Entity GetEntityById(string id, string propertyKey)
         {
-            var query = GenerateGetQuery(id, QueryGraphs);
+            var latestMetadataGraphConfiguration = _metadataGraphConfigurationRepository.GetLatestConfiguration();
+
+            var graphList = latestMetadataGraphConfiguration.Properties.GetValueOrNull(propertyKey.IsNullOrEmpty() ? string.Empty : propertyKey, false);
+           
+            var query = new SparqlParameterizedString();
+
+            // this check will make sure to fetch the graphs for the dynamic taxonomies zB CountryRegions
+            // the class name of the concept is same as the metadata class name and thus helps us to fetch multiple metadata graphs for this field
+            if (graphList.Count > 0 && propertyKey!= Graph.Metadata.Constants.RDF.Type && !propertyKey.IsNullOrEmpty())
+            {
+                 query = GenerateGetQuery(id, new List<string>() {propertyKey});
+            }
+            else
+            {
+                 query = GenerateGetQuery(id, QueryGraphs);
+            }
 
             if (query == null)
             {

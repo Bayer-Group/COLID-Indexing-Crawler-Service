@@ -7,18 +7,18 @@
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="10.1.1" />
     <PackageReference Include="AutoMapper.Extensions.Microsoft.DependencyInjection" Version="8.1.0" />
-    <PackageReference Include="COLID.Cache" Version="2.0.299" />
+    <PackageReference Include="COLID.Cache" Version="2.0.981" />
     <PackageReference Include="COLID.Common" Version="2.0.145" />
-    <PackageReference Include="COLID.Graph" Version="2.0.145" />
+    <PackageReference Include="COLID.Graph" Version="2.0.981" />
     <PackageReference Include="COLID.MessageQueue" Version="2.0.364" />
     <PackageReference Include="CorrelationId" Version="3.0.0" />
     <PackageReference Include="COLID.Identity" Version="2.0.145" />
-    <PackageReference Include="dotNetRDF" Version="2.6.0" />
+    <PackageReference Include="dotNetRDF" Version="2.7.2" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.AzureAD.UI" Version="3.1.9" />
     <PackageReference Include="Microsoft.AspNetCore.DataProtection.Abstractions" Version="3.1.9" />
     <PackageReference Include="Microsoft.AspNetCore.Hosting" Version="2.2.7" />
     <PackageReference Include="Microsoft.IdentityModel.Clients.ActiveDirectory" Version="5.2.8" />
-    <PackageReference Include="Newtonsoft.Json" Version="12.0.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
   </ItemGroup>
 
 </Project>
