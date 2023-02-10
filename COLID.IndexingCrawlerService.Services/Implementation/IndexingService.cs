@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -392,7 +392,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             }
 
             // With draft resources there is an incoming link to the published resource, so this pid uri must be removed. 
-            if (links.Contains(pidUri.ToString()))
+            if (links.Contains(pidUri.ToString()) && resourceIndexingDto.Action == ResourceCrudAction.Create)
             {
                 links.Remove(pidUri.ToString());
             }
@@ -402,18 +402,11 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             foreach (var linkedPidUriString in links)
             {
                 var linkedPidUri = new Uri(linkedPidUriString);
-                _resourceService.DeleteCachedResource(linkedPidUri);
-                var linkedResource = _resourceService.GetResourcesByPidUri(linkedPidUri);
-                foreach (var kvp in linkedResource.Published.InboundProperties)
-                {
-                    _logger.LogInformation("[UpdateLinks] Inbound Props for child resource are {kvp.Key} and {kvp.Value}", kvp.Key, kvp.Value);
-                }
+                //_resourceService.DeleteCachedResource(linkedPidUri);
+                var linkedResource = _resourceService.GetResourcesByPidUri(linkedPidUri,false);
                 var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, linkedPidUri, linkedResource.GetDraftOrPublishedVersion(), linkedResource);
                 _logger.LogInformation("[UpdateLinks] linkedPidUri to index is {linkedPidUri}", linkedPidUri);
-                _logger.LogInformation("[Indexing] Message to be index with piduri is {linkedPidUri}", linkedPidUri);
-                _logger.LogInformation("[Indexing] Message to be index from update link is {message}", JsonConvert.SerializeObject(linkedResourceIndexingDto));
                 var resourceString = JsonConvert.SerializeObject(linkedResource);
-                _logger.LogInformation("[Indexing] Message to be index from update link is {resourceString}", resourceString);
                 IndexResource(linkedResourceIndexingDto, false, false);
             }
         }
@@ -431,7 +424,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             try
             {
                 var pidUri = new Uri(pidUriString);
-                var resources = _resourceService.GetResourcesByPidUri(pidUri);
+                var resources = _resourceService.GetResourcesByPidUri(pidUri, true);
                 
                 var resourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Reindex, pidUri, resources.GetDraftOrPublishedVersion(), resources);
                 IndexResource(resourceIndexingDto);
@@ -475,6 +468,17 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             var versionMqProperty = GenerateVersionMqProperty(resourceIndexingDto.PidUri, resourceIndexingDto);
             mqMessageDict.Add(Graph.Metadata.Constants.Resource.HasVersions, versionMqProperty);
 
+            //Include LaterVersion information
+            string hasLaterVersion = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasLaterVersion, true);
+            if (hasLaterVersion != null)
+            {
+                var laterVersionProperty = new MessageQueuePropertyDTO();
+                laterVersionProperty.Inbound = new List<MessageQueueDirectionPropertyDTO>();
+                laterVersionProperty.Outbound = new List<MessageQueueDirectionPropertyDTO>();
+                laterVersionProperty.Outbound.Add(new MessageQueueDirectionPropertyDTO(hasLaterVersion, null));
+                mqMessageDict.Add(Graph.Metadata.Constants.Resource.HasLaterVersion, laterVersionProperty);                    
+            }
+
             var resourceIdMqProperty = GenerateResourceIdMessageQueueProperty(resourceIndexingDto.PidUri);
             mqMessageDict.Add(ResourceId, resourceIdMqProperty);
 
@@ -505,8 +509,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         private MessageQueuePropertyDTO GenerateVersionMqProperty(Uri pidUri, ResourceIndexingDTO resourceIndexingDto)
         {
             var versions = resourceIndexingDto.RepoResources.Versions;
-            string actualVersion = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasVersion, true);
-
+            string actualVersion = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasVersion, true);            
             var messageQueueProperty = new MessageQueuePropertyDTO();
 
             foreach (var version in versions)
@@ -533,9 +536,20 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                         new MessageQueueDirectionPropertyDTO(version.Version, null)
                     }
                 };
+                               
 
                 var messageQueueDirectionProperty = new MessageQueueDirectionPropertyDTO(value, resourceId, Graph.Metadata.Constants.Resource.HasVersions);
 
+                //////New Logic to detect Inbound and Outbound
+                ////Check if the current resourceID is present in any previous versions, if yes then add as inbound
+                //if (resourceIndexingDto.Resource.Id == version.LaterVersion)
+                //    messageQueueProperty.Inbound.Add(messageQueueDirectionProperty);
+
+                ////Check if current resource has later version in the versions list, if yes then add as Outbound
+                //if (hasLaterVersion == version.PidUri)
+                //    messageQueueProperty.Outbound.Add(messageQueueDirectionProperty);
+
+                //Old logic
                 if (actualVersion.CompareVersionTo(version.Version) > 0)
                 {
                     messageQueueProperty.Inbound.Add(messageQueueDirectionProperty);
@@ -901,7 +915,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
             if (Uri.TryCreate(value, UriKind.Absolute, out linkedPidURi))
             {
-                var resources = _resourceService.GetResourcesByPidUri(linkedPidURi);
+                var resources = _resourceService.GetResourcesByPidUri(linkedPidURi,false);
 
                 if (resources != null && resources.HasPublishedOrDraft)
                 {
@@ -983,15 +997,12 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
         private static bool IsIgnoredMetadataProperty(string propertyKey, MetadataProperty metadataProperty, bool inboundProperty = false)
         {
-            switch (propertyKey)
-            {
-                case Graph.Metadata.Constants.Resource.HasPidEntryDraft:
-                    return true;
-                case Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus:
-                    return false;
-                case Graph.Metadata.Constants.Resource.MainDistribution:
-                    return true;
-            }
+            if  (propertyKey == Graph.Metadata.Constants.Resource.HasPidEntryDraft)
+                return true;
+            else if (propertyKey == Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus)
+                return false;
+            else if (propertyKey == Graph.Metadata.Constants.Resource.MainDistribution)
+                return true;                
 
             if (metadataProperty == null)
             {

@@ -7,9 +7,9 @@
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="10.1.1" />
     <PackageReference Include="AutoMapper.Extensions.Microsoft.DependencyInjection" Version="8.1.0" />
-    <PackageReference Include="COLID.Cache" Version="2.0.981" />
+    <PackageReference Include="COLID.Cache" Version="2.0.1074" />
     <PackageReference Include="COLID.Common" Version="2.0.145" />
-    <PackageReference Include="COLID.Graph" Version="2.0.981" />
+    <PackageReference Include="COLID.Graph" Version="2.0.1074" />
     <PackageReference Include="COLID.MessageQueue" Version="2.0.364" />
     <PackageReference Include="CorrelationId" Version="3.0.0" />
     <PackageReference Include="COLID.Identity" Version="2.0.145" />

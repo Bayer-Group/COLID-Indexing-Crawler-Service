@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using COLID.IndexingCrawlerService.Repositories.Interface;
@@ -39,7 +39,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             return versions;
         }
 
-        public ResourcesCTO GetResourcesByPidUri(Uri pidUri)
+        public ResourcesCTO GetResourcesByPidUri(Uri pidUri, bool useCache = false)
         {
             var resourceTypes = _metadataService.GetInstantiableEntityTypes(Graph.Metadata.Constants.Resource.Type.FirstResouceType);
 
@@ -56,35 +56,16 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             graphsToSearchIn.Add(draftGraphUri, draftExist);
             graphsToSearchIn.Add(instanceGraphUri, publishedExist);
 
-            //if (!CheckIfResourceExist(pidUri, resourceTypes, draftGraphUri))
-            //{
-            //    return null;
-            //}
-            var resources = _cacheService.GetOrAdd($"resources:{pidUri}", () => {
+            var resources = new ResourcesCTO();
+            if (useCache)
+            {
+                resources = _cacheService.GetOrAdd($"resources:{pidUri}", () => getResourceFromRepository(pidUri, resourceTypes, graphsToSearchIn, draftGraphUri , instanceGraphUri), TimeSpan.FromHours(1));
+            }
+            else
+            {
+                resources = getResourceFromRepository(pidUri, resourceTypes, graphsToSearchIn, draftGraphUri, instanceGraphUri);
+            }
 
-                var resourcesCTO = _resourceRepository.GetResourcesByPidUri(pidUri, resourceTypes, graphsToSearchIn);
-                if (resourcesCTO.HasDraft)
-                {
-                    resourcesCTO.Draft.Properties.TryGetValue(COLID.Graph.Metadata.Constants.Resource.HasLaterVersion, out List<dynamic> laterversionDraft);
-                    if (laterversionDraft != null)
-                    {
-                        string oldValueDraft = laterversionDraft.FirstOrDefault();
-                        var newLaterVersionD = oldValueDraft.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix) ? _resourceRepository.GetPidUriById(new Uri(oldValueDraft), draftGraphUri, instanceGraphUri).ToString() : oldValueDraft;
-                        laterversionDraft[0] = newLaterVersionD;
-                    }
-                }
-                if (resourcesCTO.HasPublished)
-                {
-                    resourcesCTO.Published.Properties.TryGetValue(COLID.Graph.Metadata.Constants.Resource.HasLaterVersion, out List<dynamic> laterversionPublished);
-                    if (laterversionPublished != null)
-                    {
-                        string oldValuePublished = laterversionPublished.FirstOrDefault();
-                        var newLaterVersion = oldValuePublished.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix) ? _resourceRepository.GetPidUriById(new Uri(oldValuePublished), draftGraphUri, instanceGraphUri).ToString() : oldValuePublished;
-                        laterversionPublished[0] = newLaterVersion;
-                    }
-                }
-                return resourcesCTO;
-            }, TimeSpan.FromHours(1));
             return resources;
         }
 
@@ -121,6 +102,32 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             resourceExists.Add(draftGraphUri, draftExist);
             resourceExists.Add(instanceGraphUri, publishExist);
             return resourceExists;
+        }
+
+        private ResourcesCTO getResourceFromRepository(Uri pidUri, IList<string> resourceTypes, Dictionary<Uri, bool> namedGraphs, Uri draftGraphUri, Uri instanceGraphUri)
+        {
+            var resourcesCTO = _resourceRepository.GetResourcesByPidUri(pidUri, resourceTypes, namedGraphs);
+            if (resourcesCTO.HasDraft)
+            {
+                resourcesCTO.Draft.Properties.TryGetValue(COLID.Graph.Metadata.Constants.Resource.HasLaterVersion, out List<dynamic> laterversionDraft);
+                if (laterversionDraft != null)
+                {
+                    string oldValueDraft = laterversionDraft.FirstOrDefault();
+                    var newLaterVersionD = oldValueDraft.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix) ? _resourceRepository.GetPidUriById(new Uri(oldValueDraft), draftGraphUri, instanceGraphUri).ToString() : oldValueDraft;
+                    laterversionDraft[0] = newLaterVersionD;
+                }
+            }
+            if (resourcesCTO.HasPublished)
+            {
+                resourcesCTO.Published.Properties.TryGetValue(COLID.Graph.Metadata.Constants.Resource.HasLaterVersion, out List<dynamic> laterversionPublished);
+                if (laterversionPublished != null)
+                {
+                    string oldValuePublished = laterversionPublished.FirstOrDefault();
+                    var newLaterVersion = oldValuePublished.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix) ? _resourceRepository.GetPidUriById(new Uri(oldValuePublished), draftGraphUri, instanceGraphUri).ToString() : oldValuePublished;
+                    laterversionPublished[0] = newLaterVersion;
+                }
+            }
+            return resourcesCTO;
         }
 
     }

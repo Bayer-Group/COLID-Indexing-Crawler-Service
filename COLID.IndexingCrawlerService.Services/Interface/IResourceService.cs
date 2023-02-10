@@ -20,7 +20,7 @@ namespace COLID.IndexingCrawlerService.Services.Interface
         /// </summary>
         /// <param name="pidUri">The unique PID URI of the resource</param>
         /// <returns>A transport object containing two different lifecycle versions of resources</returns>
-        ResourcesCTO GetResourcesByPidUri(Uri pidUri);
+        ResourcesCTO GetResourcesByPidUri(Uri pidUri, bool useCache);
 
         /// <summary>
         /// Resource for indexing are completely removed from the cache.

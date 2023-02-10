@@ -324,7 +324,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             // sparqlResults are a list of all properties of one resource inkl. subentites
             counter++;
             // filtered for actual entity
-            var filteredResults = sparqlResults.Where(t => t.GetNodeValuesFromSparqlResult("object").Value == id);
+            var filteredResults = sparqlResults.Where(t => t.GetNodeValuesFromSparqlResult("object").Value == id).Where(s => s.GetNodeValuesFromSparqlResult("object_").Value != null);
 
             var groupedFilteredResults = filteredResults.GroupBy(t => t.GetNodeValuesFromSparqlResult("predicate").Value);
 
@@ -341,11 +341,22 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                         dynamic value = null;
                         if (valueProperty.Type == Graph.Metadata.Constants.Shacl.NodeKinds.IRI && sparqlResults.Any(t => t.GetNodeValuesFromSparqlResult("object").Value == valueProperty.Value) && counter <= 4)
                         {
-                            value = new Entity()
+                            var checkfilteredResults = sparqlResults.Where(t => t.GetNodeValuesFromSparqlResult("object").Value == valueProperty.Value);
+                            var checkGroupedFilteredResults = checkfilteredResults.GroupBy(t => t.GetNodeValuesFromSparqlResult("predicate").Value);
+
+                            if (checkGroupedFilteredResults.Any(x => x.Key == null))
                             {
-                                Id = valueProperty.Value,
-                                Properties = GetEntityPropertiesFromSparqlResultByList(sparqlResults, valueProperty.Value, counter)
-                            };
+                                value = string.IsNullOrWhiteSpace(valuePropertyPidUri.Value) ? valueProperty.Value : valuePropertyPidUri.Value;
+                            }
+                            else
+                            {
+                                value = new Entity()
+                                {
+                                    Id = valueProperty.Value,
+                                    Properties = GetEntityPropertiesFromSparqlResultByList(sparqlResults, valueProperty.Value, counter)
+                                };
+                            }
+                                
                         }
                         else
                         {
@@ -380,7 +391,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
 
             var parameterizedString = new SparqlParameterizedString
             {
-                CommandText = @"SELECT DISTINCT ?resource ?pidUri ?version ?baseUri ?entryLifecycleStatus ?publishedResource
+                CommandText = @"SELECT DISTINCT ?resource ?pidUri ?version ?laterVersion ?baseUri ?entryLifecycleStatus ?publishedResource
                   @fromResourceNamedGraph
                   WHERE {
                   ?subject @hasPid @hasPidUri.
@@ -392,6 +403,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                       ?resource @hasEntryLifecycleStatus ?entryLifecycleStatus.
                       OPTIONAL { ?resource @hasBaseUri ?baseUri }.
                       OPTIONAL { ?publishedResource @hasPidEntryDraft ?resource }.
+                      OPTIONAL { ?resource @hasLaterVersion ?laterVersion } .
                   } UNION {
                       ?subject @hasLaterVersion* ?resource.
                       ?resource pid3:hasVersion ?version .
@@ -399,10 +411,10 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                       ?resource @hasEntryLifecycleStatus ?entryLifecycleStatus.
                       OPTIONAL { ?resource @hasBaseUri ?baseUri }.
                       OPTIONAL { ?publishedResource @hasPidEntryDraft ?resource }.
+                      OPTIONAL { ?resource @hasLaterVersion ?laterVersion } .
                   }
                   Filter NOT EXISTS { ?draftResource  @hasPidEntryDraft ?resource}
-                  }
-                  ORDER BY ASC(?version)"
+                  }"
             };
 
             // Select all resources with their PID and target Url, which are of type resource and published
@@ -429,10 +441,25 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                 PidUri = result.GetNodeValuesFromSparqlResult("pidUri").Value,
                 BaseUri = result.GetNodeValuesFromSparqlResult("baseUri").Value,
                 LifecycleStatus = result.GetNodeValuesFromSparqlResult("entryLifecycleStatus").Value,
-                PublishedVersion = result.GetNodeValuesFromSparqlResult("publishedResource")?.Value
+                PublishedVersion = result.GetNodeValuesFromSparqlResult("publishedResource")?.Value,
+                LaterVersion = result.GetNodeValuesFromSparqlResult("laterVersion")?.Value
             }).ToList();
 
-            return resourceVersions;
+            //Sort Version ,considering laterVersion info
+            var sortedResourceVersion = new List<VersionOverviewCTO>();
+            string curLaterVersion = null;
+            for (int i = 0; i < resourceVersions.Count; i++)
+            {
+                var curResource = resourceVersions.Where(x => x.LaterVersion == curLaterVersion).FirstOrDefault();
+                if (curResource != null)
+                {
+                    sortedResourceVersion.Add(curResource);
+                    curLaterVersion = curResource.Id;
+                }
+            }
+            sortedResourceVersion.Reverse();
+
+            return sortedResourceVersion;
         }
 
         public Uri GetPidUriById(Uri Id, Uri draftGraph, Uri publishedGraph)
