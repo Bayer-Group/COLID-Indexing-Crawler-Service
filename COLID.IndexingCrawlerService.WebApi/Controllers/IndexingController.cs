@@ -1,5 +1,5 @@
 ﻿using System.Net.Mime;
-using COLID.IndexingCrawlerService.Services.Interface;
+using COLID.IndexingCrawlerService.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 

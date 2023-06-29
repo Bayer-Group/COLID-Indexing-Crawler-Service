@@ -39,7 +39,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             throw new System.NotImplementedException();
         }
 
-        public Task<ValidationResult> ValidateEntity(List<Entity> entities, IList<MetadataProperty> metadataProperties)
+        public Task<ValidationResult> ValidateEntity(IList<Entity> entities, IList<MetadataProperty> metadataProperties)
         {
             throw new System.NotImplementedException();
         }

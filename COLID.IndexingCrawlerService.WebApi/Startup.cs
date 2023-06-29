@@ -1,4 +1,5 @@
-﻿using COLID.Common.Logger;
+﻿using System.Net.Http;
+using COLID.Common.Logger;
 using COLID.Graph;
 using COLID.IndexingCrawlerService.Services;
 using COLID.MessageQueue;
@@ -38,7 +39,14 @@ namespace COLID.IndexingCrawlerService.WebApi
             services.AddCorrelationIdLogger();
             services.AddCors();
             services.AddHttpContextAccessor();
-            services.AddHttpClient();
+            services.AddHttpClient("NoProxy").ConfigurePrimaryHttpMessageHandler(() =>
+            {
+                return new HttpClientHandler
+                {
+                    UseProxy = false,
+                    Proxy = null
+                };
+            });
             services.AddHealthChecks();
             
             services.AddControllers();
@@ -53,8 +61,7 @@ namespace COLID.IndexingCrawlerService.WebApi
         /// <summary>
         /// This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         /// </summary>
-        /// <param name="app"></param>
-        /// <param name="env"></param>
+        /// <param name="app"></param>       
         public void Configure(IApplicationBuilder app)
         {
             app.UseCorrelationId();

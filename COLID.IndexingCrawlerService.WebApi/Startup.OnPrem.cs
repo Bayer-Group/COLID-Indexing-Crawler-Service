@@ -31,8 +31,7 @@ namespace COLID.IndexingCrawlerService.WebApi
         /// <summary>
         /// This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         /// </summary>
-        /// <param name="app">The application builder</param>
-        /// <param name="env">The environment</param>
+        /// <param name="app">The application builder</param>        
         public void ConfigureOnPrem(IApplicationBuilder app)
         {
             app.UseDeveloperExceptionPage();

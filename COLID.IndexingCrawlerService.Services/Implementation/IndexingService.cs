@@ -24,7 +24,7 @@ using COLID.Identity.Extensions;
 using COLID.Identity.Services;
 using COLID.IndexingCrawlerService.Services.Configuration;
 using COLID.IndexingCrawlerService.Services.Extensions;
-using COLID.IndexingCrawlerService.Services.Interface;
+using COLID.IndexingCrawlerService.Services.Interfaces;
 using COLID.MessageQueue.Configuration;
 using COLID.MessageQueue.Datamodel;
 using COLID.MessageQueue.Services;
@@ -55,6 +55,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         private readonly ColidMessageQueueOptions _mqOptions;
         private readonly JsonSerializerSettings _serializerSettings;
         private readonly int LevelLinking = 2;
+        private readonly bool _bypassProxy;
 
         private const string ResourceId = "resourceId";
         private const string InternalResourceId = "internalResourceId";
@@ -98,6 +99,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
             _serializerSettings = new JsonSerializerSettings { ContractResolver = new CamelCasePropertyNamesContractResolver() };
             _cancellationToken = httpContextAccessor?.HttpContext?.RequestAborted ?? CancellationToken.None;
+            _bypassProxy = configuration.GetValue<bool>("BypassProxy");
         }
 
         public async Task StartReindex()
@@ -110,7 +112,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
             var metadataMapping = GetMetadataMappingForAllEntityTypes().ConfigureAwait(false).GetAwaiter().GetResult();
 
-            using (var httpClient = _clientFactory.CreateClient())
+            using (var httpClient = (_bypassProxy ? _clientFactory.CreateClient("NoProxy") : _clientFactory.CreateClient()))
             {
                 _logger.LogInformation("[Reindexing] Sending metadata to search service: " + searchServiceIndexCreateUrl);
 
@@ -506,7 +508,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resource">The resource from the version chain that is to be updated</param>
         /// <returns>Returns an mq property for the versions chain</returns>
-        private MessageQueuePropertyDTO GenerateVersionMqProperty(Uri pidUri, ResourceIndexingDTO resourceIndexingDto)
+        private static MessageQueuePropertyDTO GenerateVersionMqProperty(Uri pidUri, ResourceIndexingDTO resourceIndexingDto)
         {
             var versions = resourceIndexingDto.RepoResources.Versions;
             string actualVersion = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasVersion, true);            
@@ -652,7 +654,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resource">The resource used to be checked</param>
         /// <returns>Returns an mq property</returns>
-        private bool GenerateResourceLinkedEntryLifeCycleMessageQueueProperty(ResourceIndexingDTO resourceIndexingDto, out MessageQueuePropertyDTO mqProperty)
+        private static bool GenerateResourceLinkedEntryLifeCycleMessageQueueProperty(ResourceIndexingDTO resourceIndexingDto, out MessageQueuePropertyDTO mqProperty)
         {
             var currentLifeCycle = resourceIndexingDto.CurrentLifecycleStatus;
 
@@ -950,7 +952,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 {
                     IList<TaxonomyResultDTO> taxonomies;
 
-                    using (var httpClient = _clientFactory.CreateClient())
+                    using (var httpClient = (_bypassProxy ? _clientFactory.CreateClient("NoProxy") : _clientFactory.CreateClient()))
                     {
                         _logger.LogInformation("[Indexing] Setup metadata mapping: Start retrieving taxonomies");
                         var encodedRange = HttpUtility.UrlEncode(range);
@@ -1002,7 +1004,13 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             else if (propertyKey == Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus)
                 return false;
             else if (propertyKey == Graph.Metadata.Constants.Resource.MainDistribution)
-                return true;                
+                return true;
+            else if (propertyKey == "https://pid.bayer.com/kos/19050/hasBrokenDataSteward")
+                return false;
+            else if (propertyKey == "https://pid.bayer.com/kos/19050/hasBrokenEndpointContact")
+                return false;
+            else if (propertyKey == "https://pid.bayer.com/kos/19050/hasEndpointURLStatus")
+                return false;
 
             if (metadataProperty == null)
             {

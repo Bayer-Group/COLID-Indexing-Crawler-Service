@@ -1,13 +1,13 @@
 <Project>
   <PropertyGroup>
-    <!--<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <WarningsAsErrors>true</WarningsAsErrors>-->
-    <!--<CodeAnalysisRuleSet>..\coding.ruleset</CodeAnalysisRuleSet>-->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <WarningsAsErrors>false</WarningsAsErrors>
+    <CodeAnalysisRuleSet>$(SolutionDir)coding.ruleset</CodeAnalysisRuleSet>
     <Authors>COLID team</Authors>
     <Company>Bayer AG</Company>
   </PropertyGroup>
 
-  <!--<ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.FxCopAnalyzers" Version="2.9.3" />
-  </ItemGroup>-->
+  <ItemGroup>
+      <PackageReference Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="7.0.0" />
+  </ItemGroup>
 </Project>

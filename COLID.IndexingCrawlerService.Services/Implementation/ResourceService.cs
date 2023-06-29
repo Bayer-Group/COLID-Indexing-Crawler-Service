@@ -1,8 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using COLID.IndexingCrawlerService.Repositories.Interface;
-using COLID.IndexingCrawlerService.Services.Interface;
+using COLID.IndexingCrawlerService.Repositories.Interfaces;
+using COLID.IndexingCrawlerService.Services.Interfaces;
 using COLID.Graph.Metadata.DataModels.Resources;
 using COLID.Graph.Metadata.Services;
 using COLID.RegistrationService.Common.DataModel.Resources;
@@ -113,7 +113,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 if (laterversionDraft != null)
                 {
                     string oldValueDraft = laterversionDraft.FirstOrDefault();
-                    var newLaterVersionD = oldValueDraft.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix) ? _resourceRepository.GetPidUriById(new Uri(oldValueDraft), draftGraphUri, instanceGraphUri).ToString() : oldValueDraft;
+                    var newLaterVersionD = oldValueDraft.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix, StringComparison.Ordinal) ? _resourceRepository.GetPidUriById(new Uri(oldValueDraft), draftGraphUri, instanceGraphUri).ToString() : oldValueDraft;
                     laterversionDraft[0] = newLaterVersionD;
                 }
             }
@@ -123,7 +123,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 if (laterversionPublished != null)
                 {
                     string oldValuePublished = laterversionPublished.FirstOrDefault();
-                    var newLaterVersion = oldValuePublished.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix) ? _resourceRepository.GetPidUriById(new Uri(oldValuePublished), draftGraphUri, instanceGraphUri).ToString() : oldValuePublished;
+                    var newLaterVersion = oldValuePublished.Contains(COLID.Graph.Metadata.Constants.Entity.IdPrefix, StringComparison.Ordinal) ? _resourceRepository.GetPidUriById(new Uri(oldValuePublished), draftGraphUri, instanceGraphUri).ToString() : oldValuePublished;
                     laterversionPublished[0] = newLaterVersion;
                 }
             }

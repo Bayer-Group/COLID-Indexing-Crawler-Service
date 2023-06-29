@@ -12,6 +12,13 @@ RUN dotnet publish -c release -o /app --no-restore
 
 # final stage/image
 FROM mcr.microsoft.com/dotnet/core/aspnet:3.1-alpine
+
+ARG BUILD_CIPIPELINEID
+ENV Build__CiPipelineId=${BUILD_CIPIPELINEID}
+
+ARG BUILD_CICOMMITSHA
+ENV Build__CiCommitSha=${BUILD_CICOMMITSHA}
+
 ENV PORT=8080
 ENV ASPNETCORE_URLS=http://*:${PORT}
 EXPOSE $PORT

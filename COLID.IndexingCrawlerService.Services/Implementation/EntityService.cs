@@ -1,17 +1,17 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using AutoMapper;
 using COLID.Common.Extensions;
 using COLID.Graph.TripleStore.DataModels.Attributes;
 using COLID.Graph.TripleStore.DataModels.Base;
-using COLID.IndexingCrawlerService.Repositories.Interface;
-using COLID.IndexingCrawlerService.Services.Interface;
+using COLID.IndexingCrawlerService.Repositories.Interfaces;
+using COLID.IndexingCrawlerService.Services.Interfaces;
 
 namespace COLID.IndexingCrawlerService.Services.Implementation
 {
     public class EntityService : IEntityService
     {
-        private string Type => typeof(Entity).GetAttributeValue((TypeAttribute type) => type.Type);
+        private static string Type => typeof(Entity).GetAttributeValue((TypeAttribute type) => type.Type);
 
         private readonly IEntityRepository _entityRepository;
 
@@ -23,16 +23,16 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             _mapper = mapper;
         }
 
-        public BaseEntityResultDTO GetEntity(string identifier, string propertyKey)
+        public BaseEntityResultDTO GetEntity(string id, string propertyKey)
         {
-            var entity = _entityRepository.GetEntityById(identifier, propertyKey);
+            var entity = _entityRepository.GetEntityById(id, propertyKey);
 
             return entity == null ? null : _mapper.Map<BaseEntityResultDTO>(entity);
         }
 
-        public IList<BaseEntityResultDTO> GetEntities(string type)
+        public IList<BaseEntityResultDTO> GetEntities(string entityType)
         {
-            var entitites = _entityRepository.GetEntities(type);
+            var entitites = _entityRepository.GetEntities(entityType);
 
             if (entitites == null)
             {

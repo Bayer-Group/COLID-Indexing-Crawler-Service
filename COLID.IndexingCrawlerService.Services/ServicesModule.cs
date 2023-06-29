@@ -4,7 +4,7 @@ using COLID.Graph.TripleStore.MappingProfiles;
 using COLID.Identity;
 using COLID.IndexingCrawlerService.Services.Configuration;
 using COLID.IndexingCrawlerService.Services.Implementation;
-using COLID.IndexingCrawlerService.Services.Interface;
+using COLID.IndexingCrawlerService.Services.Interfaces;
 using COLID.IndexingCrawlerService.Services.MappingProfiles;
 using COLID.MessageQueue.Services;
 using Microsoft.Extensions.Configuration;

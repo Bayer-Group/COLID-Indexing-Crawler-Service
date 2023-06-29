@@ -1,9 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using COLID.Graph.Metadata.Repositories;
 using COLID.Graph.TripleStore.Repositories;
-using COLID.IndexingCrawlerService.Repositories.Interface;
+using COLID.IndexingCrawlerService.Repositories.Interfaces;
 using VDS.RDF.Query;
 using COLID.Graph.TripleStore.DataModels.Base;
 using COLID.Common.Extensions;
@@ -14,9 +14,9 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
 {
     public class EntityRepository : IEntityRepository
     {
-        private string InsertingGraph => Graph.Metadata.Constants.MetadataGraphConfiguration.HasMetadataGraph;
+        private static string InsertingGraph => Graph.Metadata.Constants.MetadataGraphConfiguration.HasMetadataGraph;
 
-        private IEnumerable<string> QueryGraphs => new List<string>() {
+        private static IEnumerable<string> QueryGraphs => new List<string>() {
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasMetadataGraph,
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasConsumerGroupGraph,
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasPidUriTemplatesGraph,
@@ -25,7 +25,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             Graph.Metadata.Constants.MetadataGraphConfiguration.HasExtendedUriTemplateGraph
         };
 
-        private string Type => typeof(Entity).GetAttributeValue((TypeAttribute type) => type.Type);
+        private static string Type => typeof(Entity).GetAttributeValue((TypeAttribute type) => type.Type);
 
         private readonly ITripleStoreRepository _tripleStoreRepository;
 
@@ -137,7 +137,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             return _metadataGraphConfigurationRepository.GetGraphs(namedGraphs).JoinAsFromNamedGraphs();
         }
 
-        private IList<Entity> TransformQueryResults(SparqlResultSet results, string id = "")
+        private static  IList<Entity> TransformQueryResults(SparqlResultSet results, string id = "")
         {
             if (results.IsEmpty)
             {
@@ -151,7 +151,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                 var subGroupedResults = result.GroupBy(res => res.GetNodeValuesFromSparqlResult("predicate").Value);
                 var newEntity = new Entity
                 {
-                    Id = id == string.Empty ? result.Key : id,
+                    Id = id.IsNullOrEmpty() ? result.Key : id,
                     Properties = subGroupedResults.ToDictionary(x => x.Key, x => x.Select(property => GetEntityPropertyFromSparqlResult(property)).ToList())
                 };
 
@@ -161,7 +161,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             return foundEntities;
         }
 
-        private dynamic GetEntityPropertyFromSparqlResult(SparqlResult res)
+        private static dynamic GetEntityPropertyFromSparqlResult(SparqlResult res)
         {
             return res.GetNodeValuesFromSparqlResult("object").Value;
         }

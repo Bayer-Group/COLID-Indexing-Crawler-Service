@@ -1,7 +1,7 @@
 ﻿using System.Collections.Generic;
 using COLID.Graph.TripleStore.DataModels.Base;
 
-namespace COLID.IndexingCrawlerService.Services.Interface
+namespace COLID.IndexingCrawlerService.Services.Interfaces
 {
     public interface IEntityService
     {

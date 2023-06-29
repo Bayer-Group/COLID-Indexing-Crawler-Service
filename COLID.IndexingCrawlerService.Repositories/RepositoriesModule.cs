@@ -5,7 +5,7 @@ using COLID.Cache.Configuration;
 using COLID.Graph;
 using COLID.Graph.TripleStore.DataModels.Serializers;
 using COLID.IndexingCrawlerService.Repositories.Implementation;
-using COLID.IndexingCrawlerService.Repositories.Interface;
+using COLID.IndexingCrawlerService.Repositories.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;

@@ -1,6 +1,6 @@
 ﻿using System.Threading.Tasks;
 
-namespace COLID.IndexingCrawlerService.Services.Interface
+namespace COLID.IndexingCrawlerService.Services.Interfaces
 {
     public interface IIndexingService
     {

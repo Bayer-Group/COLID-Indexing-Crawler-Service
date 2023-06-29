@@ -1,10 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using COLID.Exception.Models.Business;
-using COLID.IndexingCrawlerService.Repositories.Interface;
+using COLID.IndexingCrawlerService.Repositories.Interfaces;
 using VDS.RDF.Query;
 using COLID.Graph.TripleStore.Extensions;
 using COLID.Graph.TripleStore.Repositories;
@@ -19,10 +19,10 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
 {
     public class ResourceRepository : IResourceRepository
     {
-        private string InsertingGraph => Graph.Metadata.Constants.MetadataGraphConfiguration.HasResourcesGraph;
-        private string InsertingDraftGraph => Graph.Metadata.Constants.MetadataGraphConfiguration.HasResourcesDraftGraph;
+        private static string InsertingGraph => Graph.Metadata.Constants.MetadataGraphConfiguration.HasResourcesGraph;
+        private static string InsertingDraftGraph => Graph.Metadata.Constants.MetadataGraphConfiguration.HasResourcesDraftGraph;
 
-        private IEnumerable<string> QueryGraphs => new List<string>() { InsertingGraph, InsertingDraftGraph };
+        private static IEnumerable<string> QueryGraphs => new List<string>() { InsertingGraph, InsertingDraftGraph };
 
         private readonly ITripleStoreRepository _tripleStoreRepository;
         private readonly IMetadataGraphConfigurationRepository _metadataGraphConfigurationRepository;
@@ -165,10 +165,10 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             Resource resourcePublished = new Resource();
             Resource resourceDraft = new Resource();
 
-            if (graphName == "")
+            if (graphName.IsNullOrEmpty())
             {
-                var draftUri = namedGraphs.Where(x => x.Key.ToString().ToUpper().Contains("DRAFT")).Select(x => x.Key).FirstOrDefault();
-                var publishedUri = namedGraphs.Where(x => !x.Key.ToString().ToUpper().Contains("DRAFT")).Select(x => x.Key).FirstOrDefault();
+                var draftUri = namedGraphs.Where(x => x.Key.ToString().ToUpper().Contains("DRAFT", StringComparison.Ordinal)).Select(x => x.Key).FirstOrDefault();
+                var publishedUri = namedGraphs.Where(x => !x.Key.ToString().ToUpper().Contains("DRAFT", StringComparison.Ordinal)).Select(x => x.Key).FirstOrDefault();
 
                 parameterizedString.SetUri("resourceNamedGraph", publishedUri); // Sowohl aus draft als auch aus publish
 
@@ -191,7 +191,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                 namedGraphs.Add(draftUri, true);
                 resourceDraft = BuildResourceFromQuery(parameterizedString, pidUri, namedGraphs).FirstOrDefault(); // PREVIOUSVERSIONS AUS DER PUBLIC RESOURCE WERDEN RAUSGEHOLT -> TODO : LINKS SEPERAT RAUSHOLEN
             }
-            else if (graphName.ToUpper().Contains("DRAFT"))
+            else if (graphName.ToUpper().Contains("DRAFT", StringComparison.Ordinal))
             {
                 parameterizedString.SetUri("resourceNamedGraph", new Uri(graphName));
                 resourceDraft = BuildResourceFromQuery(parameterizedString, pidUri, namedGraphs).FirstOrDefault(); // PREVIOUSVERSIONS AUS DER PUBLIC RESOURCE WERDEN RAUSGEHOLT -> TODO : LINKS SEPERAT RAUSHOLEN
@@ -281,7 +281,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
         //    return entities;
         //}
 
-        private void WaitAllTasks(CancellationTokenSource cancellationTokenSource, params Task[] tasks)
+        private static void WaitAllTasks(CancellationTokenSource cancellationTokenSource, params Task[] tasks)
         {
             // OperationCanceledException will be thrown if time of token expired
             Task.WaitAll(tasks, cancellationTokenSource.Token);
@@ -368,7 +368,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                 });
         }
 
-        private IDictionary<string, List<dynamic>> GetInboundEntityPropertiesFromSparqlResultByList(IGrouping<string, SparqlResult> sparqlResults, int counter)
+        private static IDictionary<string, List<dynamic>> GetInboundEntityPropertiesFromSparqlResultByList(IGrouping<string, SparqlResult> sparqlResults, int counter)
         {
             // sparqlResults are a list of all properties of one resource inkl. subentites
             counter++;
@@ -382,7 +382,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
                 res => res.Select(t => t.GetNodeValuesFromSparqlResult("inboundPidUri")?.Value).Distinct().Cast<dynamic>().ToList());
         }
 
-        public IList<VersionOverviewCTO> GetAllVersionsOfResourceByPidUri(Uri pidUri, ISet<Uri> namedGraphs )
+        public IList<VersionOverviewCTO> GetAllVersionsOfResourceByPidUri(Uri pidUri, ISet<Uri> namedGraph )
         {
             if (pidUri == null)
             {
@@ -419,7 +419,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
 
             // Select all resources with their PID and target Url, which are of type resource and published
 
-            parameterizedString.SetPlainLiteral("fromResourceNamedGraph", namedGraphs.JoinAsFromNamedGraphs());
+            parameterizedString.SetPlainLiteral("fromResourceNamedGraph", namedGraph.JoinAsFromNamedGraphs());
             parameterizedString.SetUri("hasPidUri", pidUri);
             parameterizedString.SetUri("hasPid", new Uri(Graph.Metadata.Constants.EnterpriseCore.PidUri));
             parameterizedString.SetUri("hasBaseUri", new Uri(Graph.Metadata.Constants.Resource.BaseUri));
@@ -450,11 +450,11 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             string curLaterVersion = null;
             for (int i = 0; i < resourceVersions.Count; i++)
             {
-                var curResource = resourceVersions.Where(x => x.LaterVersion == curLaterVersion).FirstOrDefault();
-                if (curResource != null)
+                var curResource = resourceVersions.Where(x => x.LaterVersion == curLaterVersion).ToList();
+                if (curResource.Count > 0)
                 {
-                    sortedResourceVersion.Add(curResource);
-                    curLaterVersion = curResource.Id;
+                    sortedResourceVersion.AddRange(curResource);
+                    curLaterVersion = curResource.FirstOrDefault().Id;
                 }
             }
             sortedResourceVersion.Reverse();
@@ -462,7 +462,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             return sortedResourceVersion;
         }
 
-        public Uri GetPidUriById(Uri Id, Uri draftGraph, Uri publishedGraph)
+        public Uri GetPidUriById(Uri id, Uri draftGraph, Uri publishedGraph)
         {
             SparqlParameterizedString parameterizedString = new SparqlParameterizedString
             {
@@ -479,7 +479,7 @@ namespace COLID.IndexingCrawlerService.Repositories.Implementation
             parameterizedString.SetUri("resourcePublishedGraph", publishedGraph);
             parameterizedString.SetUri("resourceDraftGraph", draftGraph);
             parameterizedString.SetUri("hasPid", new Uri(Graph.Metadata.Constants.EnterpriseCore.PidUri));
-            parameterizedString.SetUri("id", Id);
+            parameterizedString.SetUri("id", id);
 
             var result = _tripleStoreRepository.QueryTripleStoreResultSet(parameterizedString).FirstOrDefault();
             if (result.IsNullOrEmpty() || !result.Any())
