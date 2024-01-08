@@ -1,24 +1,21 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netcoreapp3.1</TargetFramework>
+    <TargetFramework>net6.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="10.1.1" />
     <PackageReference Include="AutoMapper.Extensions.Microsoft.DependencyInjection" Version="8.1.0" />
-    <PackageReference Include="COLID.Cache" Version="2.0.1076" />
-    <PackageReference Include="COLID.Common" Version="2.0.145" />
-    <PackageReference Include="COLID.Graph" Version="2.0.1076" />
-    <PackageReference Include="COLID.MessageQueue" Version="2.0.364" />
-    <PackageReference Include="CorrelationId" Version="3.0.0" />
-    <PackageReference Include="COLID.Identity" Version="2.0.145" />
+    <PackageReference Include="COLID.Cache" Version="2.0.1078" />
+    <PackageReference Include="COLID.Common" Version="2.0.149" />
+    <PackageReference Include="COLID.Graph" Version="2.0.1078" />
+    <PackageReference Include="COLID.MessageQueue" Version="2.0.367" />
+    <PackageReference Include="COLID.Identity" Version="2.0.1066" />
     <PackageReference Include="dotNetRDF" Version="2.7.2" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.AzureAD.UI" Version="3.1.9" />
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection.Abstractions" Version="3.1.9" />
-    <PackageReference Include="Microsoft.AspNetCore.Hosting" Version="2.2.7" />
-    <PackageReference Include="Microsoft.IdentityModel.Clients.ActiveDirectory" Version="5.2.8" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.AzureAD.UI" Version="6.0.20" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.Abstractions" Version="7.0.9" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
 </Project>

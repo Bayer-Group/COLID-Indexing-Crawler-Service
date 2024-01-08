@@ -28,7 +28,6 @@ using COLID.IndexingCrawlerService.Services.Interfaces;
 using COLID.MessageQueue.Configuration;
 using COLID.MessageQueue.Datamodel;
 using COLID.MessageQueue.Services;
-using CorrelationId.Abstractions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -50,7 +49,6 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         private readonly IMetadataService _metadataService;
         private readonly IResourceService _resourceService;
         private readonly IEntityService _entityService;
-        private readonly ICorrelationContextAccessor _correlationContext;
         private readonly IConfiguration _configuration;
         private readonly ColidMessageQueueOptions _mqOptions;
         private readonly JsonSerializerSettings _serializerSettings;
@@ -78,7 +76,6 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             IEntityService entityService,
             IHttpClientFactory clientFactory,
             IEntityHasher hasher,
-            ICorrelationContextAccessor correlationContext,
             IConfiguration configuration,
             ITokenService<ColidRegistrationServiceTokenOptions> registrationServiceTokenService,
             ITokenService<ColidSearchServiceTokenOptions> searchServiceTokenService,
@@ -91,7 +88,6 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             _cacheService = cacheService;
             _entityService = entityService;
             _clientFactory = clientFactory;
-            _correlationContext = correlationContext;
             _hasher = hasher;
             _configuration = configuration;
             _registrationServiceTokenService = registrationServiceTokenService;
@@ -118,7 +114,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
                 var accessToken = await _searchServiceTokenService.GetAccessTokenForWebApiAsync();
                 var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Post, searchServiceIndexCreateUrl,
-                    metadataMapping, accessToken, _cancellationToken, _correlationContext.CorrelationContext);
+                    metadataMapping, accessToken, _cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -960,7 +956,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
                         var accessToken = await _registrationServiceTokenService.GetAccessTokenForWebApiAsync();
                         var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Get, registrationServiceGetTaxonomyListUrl,
-                            null, accessToken, _cancellationToken, _correlationContext.CorrelationContext);
+                            null, accessToken, _cancellationToken);
 
                         if (!response.IsSuccessStatusCode)
                         {
