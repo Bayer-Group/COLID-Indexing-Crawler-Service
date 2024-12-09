@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
@@ -7,6 +7,7 @@
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="10.1.1" />
     <PackageReference Include="AutoMapper.Extensions.Microsoft.DependencyInjection" Version="8.1.0" />
+    <PackageReference Include="COLID.AWS" Version="2.0.154" />
     <PackageReference Include="COLID.Cache" Version="2.0.1078" />
     <PackageReference Include="COLID.Common" Version="2.0.149" />
     <PackageReference Include="COLID.Graph" Version="2.0.1078" />
