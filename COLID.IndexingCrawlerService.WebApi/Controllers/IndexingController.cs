@@ -1,4 +1,5 @@
 ﻿using System.Net.Mime;
+using System.Threading.Tasks;
 using COLID.IndexingCrawlerService.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -29,9 +30,21 @@ namespace COLID.IndexingCrawlerService.WebApi.Controllers
         /// </summary>
         /// <returns></returns>
         [HttpPost]
-        public IActionResult StartReindex()
+        public async Task<IActionResult> StartReindex()
         {
-            _indexingService.StartReindex();
+            await _indexingService.StartReindex();
+
+            return Ok();
+        }
+
+        /// <summary>
+        /// Index a document.
+        /// </summary>
+        /// <returns></returns>
+        [HttpPut]
+        public IActionResult IndexResource([FromBody] string resource)
+        {
+            _indexingService.IndexResourceFromTopic(resource);
 
             return Ok();
         }

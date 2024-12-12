@@ -6,6 +6,8 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
+using Amazon.SQS.Model;
+using COLID.AWS.Interface;
 using COLID.Cache.Services;
 using COLID.Common.Extensions;
 using COLID.Common.Utilities;
@@ -34,12 +36,13 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
+using VDS.RDF.Query.Expressions.Functions.Sparql;
 
 namespace COLID.IndexingCrawlerService.Services.Implementation
 {
-    public class IndexingService : IIndexingService, IMessageQueueReceiver, IMessageQueuePublisher
+    public class IndexingService : IIndexingService , IMessageQueueReceiver, IMessageQueuePublisher
     {
-        private readonly CancellationToken _cancellationToken;
+        //private readonly CancellationToken _cancellationToken;
         private readonly ITokenService<ColidRegistrationServiceTokenOptions> _registrationServiceTokenService;
         private readonly ITokenService<ColidSearchServiceTokenOptions> _searchServiceTokenService;
         private readonly ILogger<IndexingService> _logger;
@@ -54,15 +57,27 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         private readonly JsonSerializerSettings _serializerSettings;
         private readonly int LevelLinking = 2;
         private readonly bool _bypassProxy;
-
+        private readonly IAmazonSQSService _amazonSQSService;
+        private readonly IAmazonSQSExtendedService _amazonSQSExtService;
+        private readonly string _indexingPidUriInputQueueUrl;
+        private readonly string _indexingOpensearchDocInputQueueUrl;
+        private readonly string _indexingOpensearchDocInputS3;
+        private readonly string _indexingResourceDTOInputQueueUrl;
+        private readonly string _searchServiceIndexUrl;
         private const string ResourceId = "resourceId";
         private const string InternalResourceId = "internalResourceId";
         private const string ResourceHash = "resourceHash";
         private const string ResourceLinkedLifecycleStatus = "resourceLinkedLifecycleStatus";
 
+        private bool _reIndexRunning = false;
+        private readonly object _reIndexlock = new object();
+
+        private bool _indexRunning = false;
+        private readonly object _indexlock = new object();
+
         public IDictionary<string, Action<string>> OnTopicReceivers => new Dictionary<string, Action<string>>() {
-            {_mqOptions.Topics["ReindexingResources"], ReindexResource },
-            {_mqOptions.Topics["IndexingResources"], IndexResourceFromTopic }
+            {_mqOptions.Topics["ReindexingResources"], async (message) => await IndexResourceFromTopic(message) },
+            {_mqOptions.Topics["IndexingResources"],  async (message) => await IndexResourceFromTopic(message) }
         };
 
         public Action<string, string, BasicProperty> PublishMessage { get; set; }
@@ -79,7 +94,9 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             IConfiguration configuration,
             ITokenService<ColidRegistrationServiceTokenOptions> registrationServiceTokenService,
             ITokenService<ColidSearchServiceTokenOptions> searchServiceTokenService,
-            IHttpContextAccessor httpContextAccessor)
+            IHttpContextAccessor httpContextAccessor,
+            IAmazonSQSService amazonSQSService,
+            IAmazonSQSExtendedService amazonSQSExtService)
         {
             _mqOptions = messageQueueOptionsAccessor.CurrentValue;
             _logger = logger;
@@ -94,8 +111,15 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             _searchServiceTokenService = searchServiceTokenService;
 
             _serializerSettings = new JsonSerializerSettings { ContractResolver = new CamelCasePropertyNamesContractResolver() };
-            _cancellationToken = httpContextAccessor?.HttpContext?.RequestAborted ?? CancellationToken.None;
+            //_cancellationToken = httpContextAccessor?.HttpContext?.RequestAborted ?? CancellationToken.None;
             _bypassProxy = configuration.GetValue<bool>("BypassProxy");
+            _amazonSQSService = amazonSQSService;
+            _amazonSQSExtService = amazonSQSExtService;
+            _indexingPidUriInputQueueUrl = configuration.GetConnectionString("IndexingPidUriInputQueueUrl");
+            _indexingOpensearchDocInputQueueUrl = configuration.GetConnectionString("IndexingOpensearchDocInputQueueUrl");
+            _indexingOpensearchDocInputS3 = configuration.GetConnectionString("IndexingOpensearchDocInputS3");
+            _indexingResourceDTOInputQueueUrl = configuration.GetConnectionString("IndexingResourceDTOInputQueueUrl");
+            _searchServiceIndexUrl = $"{_configuration.GetConnectionString("searchServiceReindexUrl")}/api/";            
         }
 
         public async Task StartReindex()
@@ -105,73 +129,80 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
             _logger.LogInformation("[Reindexing] Clear cache");
             _cacheService.Clear();
-
-            var metadataMapping = GetMetadataMappingForAllEntityTypes().ConfigureAwait(false).GetAwaiter().GetResult();
-
-            using (var httpClient = (_bypassProxy ? _clientFactory.CreateClient("NoProxy") : _clientFactory.CreateClient()))
+            try
             {
-                _logger.LogInformation("[Reindexing] Sending metadata to search service: " + searchServiceIndexCreateUrl);
 
-                var accessToken = await _searchServiceTokenService.GetAccessTokenForWebApiAsync();
-                var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Post, searchServiceIndexCreateUrl,
-                    metadataMapping, accessToken, _cancellationToken);
-
-                if (!response.IsSuccessStatusCode)
+                var metadataMapping = GetMetadataMappingForAllEntityTypes().ConfigureAwait(false).GetAwaiter().GetResult();
+                
+                using (var httpClient = (_bypassProxy ? _clientFactory.CreateClient("NoProxy") : _clientFactory.CreateClient()))
                 {
-                    _logger.LogError("[Reindexing] Something went wrong while starting reindexing\nResponse Content={responseContent}", response.Content);
-                    throw new System.Exception("Something went wrong while starting reindexing");
-                }
-            }
+                    using (var cancelSource = new CancellationTokenSource())
+                    {
+                        httpClient.Timeout = TimeSpan.FromMinutes(5);
+                        _logger.LogInformation("[Reindexing] Sending metadata to search service: " + searchServiceIndexCreateUrl);
 
-            _resourceService.DeleteCachedResources();
-            SendAllResources();
+                        var accessToken = await _searchServiceTokenService.GetAccessTokenForWebApiAsync();
+                        var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Post, searchServiceIndexCreateUrl,
+                            metadataMapping, accessToken, cancelSource.Token);
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            _logger.LogError("[Reindexing] Something went wrong while starting reindexing Response Content={responseContent}", response.Content);
+                            throw new System.Exception("Something went wrong while starting reindexing");
+                        }
+                    }
+                    
+                }
+
+                _resourceService.DeleteCachedResources();
+
+                //Start reindex in seperate thread
+                Thread background = new Thread(() => SendAllResourcesToSQS());
+                background.Start();
+                
+            }
+            catch(System.Exception ex)
+            {
+                _logger.LogError("[Reindexing] Something went wrong while starting reindexing {Message}", ex.Message);
+            }
         }
 
         /// <summary>
         /// Get the pid uri of all published entries and send it to mq
         /// </summary>
-        private void SendAllResources()
+        private async Task SendAllResourcesToSQS()
         {
             _logger.LogInformation("[Reindexing] Send all resources");
-
-            _logger.LogInformation("[Reindexing] Getting all resource pid uris");
+           
             var pidUris = _resourceService.GetAllPidUris();
 
             _logger.LogInformation("[Reindexing] Sending {pidUrisCount} resources", pidUris.Count);
-
-            var ind = 0;
+            
             foreach (var pidUri in pidUris)
             {
-                try
+                if (_mqOptions.Enabled)
                 {
-                    _logger.LogInformation("[Reindexing] Sending PID URI to topic\nPidUri={PidUri}\nMqTopic={MQTopic}", pidUri, "TopicResourcePublishedPidUriIndexing");
-                    PublishMessage(_mqOptions.Topics["ReindexingResources"], pidUri.ToString(), new BasicProperty() { Priority = 0 });
-                    ind = ind + 1;
-                    if (ind % 10 == 0)
-                    {
-                        _logger.LogInformation("Written " + ind + 1 + "resources to ReindxingResources Topic");
-                    }
+                    //If using MessageQueue process piduris immediately
+                    var resources = _resourceService.GetResourcesByPidUri(pidUri, _reIndexRunning);
+                    var resourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Reindex, pidUri, resources.GetDraftOrPublishedVersion(), resources);
+                    await IndexResource(resourceIndexingDto);
                 }
-                catch (System.Exception ex)
+                else
                 {
-                    _logger.LogError(ex, "[Reindexing] FAILED - Sending PID URI to topic\nPidUri={PidUri}\nMqTopic={MQTopic}", pidUri, "TopicResourcePublishedPidUriIndexing");
+                    //Upload piduris to SQS so that Background service can pickup and Process by invoking the ReIndexResource Method            
+                    await _amazonSQSService.SendMessageAsync(_indexingPidUriInputQueueUrl, pidUri);
+                    
                 }
             }
-            _logger.LogInformation("[Reindexing] Actual count of resources sent to queue: " + (ind + 1));
-            var lastPidUris= Enumerable.Reverse(pidUris).Take(5).Reverse().ToList();
-            var message = JsonConvert.SerializeObject(new { lastPidUris = lastPidUris }, _serializerSettings);
-            _logger.LogInformation("[Reindexing] Sending last5PidUris {message} to ReindexingSwitch Topic", message);
-            try
-            {
-                PublishMessage(_mqOptions.Topics["ReindexingSwitch"], message, new BasicProperty() { Priority = 0 });
+            //Switch Index only if MessageQueue is used
+            if (_mqOptions.Enabled)
+            {                
+                SwitchIndex();
             }
-            catch (System.Exception ex)
-            {
-                _logger.LogError(ex, "[Reindexing] Something went wrong while sending the last5PidUris.\nPidUri={lastPidUri}\nMqTopic=ReindexingSwitch", message);
-            }
+            
         }
 
-        public void IndexResource(ResourceIndexingDTO resourceIndexingDto)
+        public async Task IndexResource(ResourceIndexingDTO resourceIndexingDto)
         {
             Guard.ArgumentNotNull(resourceIndexingDto, nameof(resourceIndexingDto));
 
@@ -183,15 +214,15 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 switch (resourceIndexingDto.Action)
                 {
                     case ResourceCrudAction.Reindex:
-                        IndexResource(resourceIndexingDto, false, false);
+                        await IndexResource(resourceIndexingDto, false, false);
                         break;
                     case ResourceCrudAction.Deletion:
                         _resourceService.DeleteCachedResource(resourceIndexingDto.PidUri);
-                        DeleteResource(resourceIndexingDto, true);
+                        await DeleteResource(resourceIndexingDto, true);
                         break;
                     default:
                         _resourceService.DeleteCachedResource(resourceIndexingDto.PidUri);
-                        IndexResource(resourceIndexingDto, true, true);
+                        await IndexResource(resourceIndexingDto, true, true);
                         break;
                 }
             }
@@ -201,10 +232,10 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 throw;
             }
         }
-
-        public void IndexResourceFromTopic(string indexedResourceString)
+        
+        public async Task IndexResourceFromTopic(string indexedResourceString)
         {
-            _logger.LogInformation($"[Indexing] Receive indexed resource from Topic 'IndexingResources'");
+            //_logger.LogInformation($"[Indexing] Receive indexed resource from Topic 'IndexingResources'");
 
             Guard.ArgumentNotNullOrWhiteSpace(indexedResourceString, nameof(indexedResourceString));
 
@@ -212,7 +243,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             {
                 _logger.LogInformation("[Indexing] Message to be index from reg service is {message}", indexedResourceString);
                 var resourceIndexingDto = JsonConvert.DeserializeObject<ResourceIndexingDTO>(indexedResourceString);
-                IndexResource(resourceIndexingDto);
+                await IndexResource(resourceIndexingDto);
             }
             catch (JsonSerializationException)
             {
@@ -228,12 +259,12 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// <param name="resourceIndexingDto">Resource indexing dto to be indexed</param>
         /// <param name="updatedInboundLinks">Indicates whether resources that have outgoing connections to the current resource need to be updated . </param>
         /// <param name="updateOutboundLinks">indicates whether linked resources of the current resource must be updated.</param>
-        private void IndexResource(ResourceIndexingDTO resourceIndexingDto, bool updatedInboundLinks, bool updateOutboundLinks)
+        private async Task IndexResource(ResourceIndexingDTO resourceIndexingDto, bool updatedInboundLinks, bool updateOutboundLinks)
         {
             string resourceType = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
             var metadataProperties = _metadataService.GetMetadataForEntityType(resourceType);
 
-            IndexResource(resourceIndexingDto, metadataProperties);
+            await IndexResource(resourceIndexingDto, metadataProperties);
 
             // If a draft resource is updated or re-indexed and also has a published resource, the published resource must also be indexed. 
             if ((resourceIndexingDto.Action == ResourceCrudAction.Update || resourceIndexingDto.Action == ResourceCrudAction.Reindex) &&
@@ -245,7 +276,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, resourceIndexingDto.PidUri, linkedResource, repoResources);
 
                 // Links do not need to be updated, because only the information that the published entry has a draft is relevant and must be updated.
-                IndexResource(linkedResourceIndexingDto, metadataProperties);
+                await IndexResource(linkedResourceIndexingDto, metadataProperties);
             }
 
             // If a resource is published and also has a draft version, the draft version must be removed from the index.  
@@ -255,36 +286,42 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 var linkedResource = resourceIndexingDto.RepoResources.Draft;
                 var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, resourceIndexingDto.PidUri, linkedResource, resourceIndexingDto.RepoResources);
 
-                DeleteResource(linkedResourceIndexingDto, false);
+                await DeleteResource(linkedResourceIndexingDto, false);
             }
 
             // Links must be updated in different cases, because they contain changed information of the current resource 
             if (updatedInboundLinks || updateOutboundLinks)
             {
-                UpdateLinks(resourceIndexingDto, metadataProperties, updatedInboundLinks, updateOutboundLinks);
+                await UpdateLinks(resourceIndexingDto, metadataProperties, updatedInboundLinks, updateOutboundLinks);
             }
         }
 
-        private void IndexResource(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties)
+        private async Task IndexResource(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties)
         {
             if (resourceIndexingDto.Resource == null || !metadataProperties.Any())
             {
-                _logger.LogInformation("[Indexing] Send published resource. No resource or no metatdata\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourcePublished");
+                _logger.LogInformation("[Indexing] No resource or no metatdata PidUri = {PidUri}", resourceIndexingDto.PidUri);
                 return;
             }
-
+            
             try
             {
                 var indexDocument = GenerateIndexDocument(resourceIndexingDto, metadataProperties);
                 var message = JsonConvert.SerializeObject(indexDocument, _serializerSettings);
+                
+                if (_mqOptions.Enabled)
+                {
+                    PublishMessage(_mqOptions.Topics["IndexingResourceDocument"], System.Text.Json.JsonSerializer.Serialize<string>(message), new BasicProperty() { Priority = 0 });
+                }
+                else
+                {
+                    await _amazonSQSExtService.SendMessageAsync(_indexingOpensearchDocInputQueueUrl, _indexingOpensearchDocInputS3, message);
 
-                _logger.LogInformation("[Indexing] Publish mq message for resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourcePublished");
-                _logger.LogInformation("[Indexing] Message to be published is {message}", message);
-                PublishMessage(_mqOptions.Topics["IndexingResourceDocument"], message, new BasicProperty() { Priority = 0 });
+                }
             }
             catch (System.Exception ex)
             {
-                _logger.LogError(ex, "[Indexing] Something went wrong while sending the resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourcePublished");
+                _logger.LogError(ex, "[Indexing] Something went wrong while Indexing PidUri = {PidUri}", resourceIndexingDto.PidUri);
             }
         }
 
@@ -294,7 +331,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// </summary>
         /// <param name="resourceIndexingDto">Resource indexing dto to be deleted</param>
         /// <param name="updatePublished">Determines is published should be updated</param>
-        private void DeleteResource(ResourceIndexingDTO resourceIndexingDto, bool updatePublished)
+        private async Task DeleteResource(ResourceIndexingDTO resourceIndexingDto, bool updatePublished)
         {
             Guard.ArgumentNotNull(resourceIndexingDto, nameof(resourceIndexingDto));
 
@@ -311,8 +348,17 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 var currentLifeCycle = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
                 var indexDocument = new IndexDocumentDto(resourceIndexingDto.PidUri, ResourceCrudAction.Deletion, currentLifeCycle, mqMessageDict);
                 var message = JsonConvert.SerializeObject(indexDocument, _serializerSettings);
+                
 
-                PublishMessage(_mqOptions.Topics["IndexingResourceDocument"], message, new BasicProperty() { Priority = 0 });
+                if (_mqOptions.Enabled)
+                {
+                    PublishMessage(_mqOptions.Topics["IndexingResourceDocument"], System.Text.Json.JsonSerializer.Serialize<string>(message), new BasicProperty() { Priority = 0 });
+                }
+                else
+                {
+                    await _amazonSQSExtService.SendMessageAsync(_indexingOpensearchDocInputQueueUrl, _indexingOpensearchDocInputS3, message);
+
+                }
 
                 string resourceType = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
                 var metadataProperties = _metadataService.GetMetadataForEntityType(resourceType);
@@ -327,21 +373,21 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                         var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Publish, resourceIndexingDto.PidUri, resourceIndexingDto.RepoResources.Published, repoResources);
 
                         // Update published outbound links and draft & published related inbound links
-                        IndexResource(linkedResourceIndexingDto, true, true);
+                        await IndexResource(linkedResourceIndexingDto, true, true);
                     }
 
                     // Update draft outbound links
-                    UpdateLinks(resourceIndexingDto, metadataProperties, false, true);
+                    await UpdateLinks(resourceIndexingDto, metadataProperties, false, true);
                 }
                 else
                 {
-                    UpdateLinks(resourceIndexingDto, metadataProperties, true, true);
+                    await UpdateLinks(resourceIndexingDto, metadataProperties, true, true);
                 }
 
             }
             catch (System.Exception ex)
             {
-                _logger.LogError(ex, "[Indexing] FAILED Deleting resource.\nPidUri={PidUri}\nMqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourceDeleted");
+                _logger.LogError(ex, "[Indexing] FAILED Deleting resource. PidUri={PidUri} MqTopic={MQTopic}", resourceIndexingDto.PidUri, "TopicResourceDeleted");
             }
         }
 
@@ -354,7 +400,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
         /// <param name="metadataProperties">Metadata of current resource to be indexed</param>
         /// <param name="inbound">Indicates whether resources that have outgoing connections to the current resource need to be updated . </param>
         /// <param name="outbound">indicates whether linked resources of the current resource must be updated.</param>
-        private void UpdateLinks(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties, bool inbound, bool outbound)
+        private async Task UpdateLinks(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties, bool inbound, bool outbound)
         {
             var pidUri = resourceIndexingDto.PidUri;
 
@@ -405,39 +451,168 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 var linkedResourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Update, linkedPidUri, linkedResource.GetDraftOrPublishedVersion(), linkedResource);
                 _logger.LogInformation("[UpdateLinks] linkedPidUri to index is {linkedPidUri}", linkedPidUri);
                 var resourceString = JsonConvert.SerializeObject(linkedResource);
-                IndexResource(linkedResourceIndexingDto, false, false);
+                await IndexResource(linkedResourceIndexingDto, false, false);
             }
         }
 
         /// <summary>
-        /// Send the resource to the mq
-        /// </summary>
-        /// <param name="pidUriString">Pid uri of resource</param>
-        public void ReindexResource(string pidUriString)
-        {
-            _logger.LogInformation("[Reindex] Receive pid uri {pidUri} from Topic 'ReindexingResources'", pidUriString);
-
-            Guard.ArgumentNotNullOrWhiteSpace(pidUriString, nameof(pidUriString));
+        /// Fetch pidUris from SQS and start Indexing
+        /// </summary>        
+        public async void ReindexResource(string action)
+        {           
+            //Lock method so that multiple call from Background service does not invoke this method when its busy processing messages
+            lock(_reIndexlock)
+            {
+                if (_reIndexRunning)
+                {
+                    return;
+                }
+                else
+                {
+                    _reIndexRunning = true;
+                }
+            }
 
             try
             {
-                var pidUri = new Uri(pidUriString);
-                var resources = _resourceService.GetResourcesByPidUri(pidUri, true);
-                
-                var resourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Reindex, pidUri, resources.GetDraftOrPublishedVersion(), resources);
-                IndexResource(resourceIndexingDto);
+                //Check for msgs in a loop           
+                int msgcount = 0;
+                bool msgProcessed = false;
+                do
+                {
+                    //Check msgs available in SQS                      
+                    var msgs = await _amazonSQSService.ReceiveMessageAsync(_indexingPidUriInputQueueUrl, 5, 10);
+                    msgcount = msgs.Count;
+
+                    //Iterate on each msg which containing a pidUri
+                    foreach (var msg in msgs)
+                    {
+                        msgProcessed = true;
+                        try
+                        {
+                            //Delete the msg from SQS Queue before it times out
+                            await _amazonSQSService.DeleteMessageAsync(_indexingPidUriInputQueueUrl, msg.ReceiptHandle);
+                            //Then process the msg
+                            var pidUriString = System.Text.Json.JsonSerializer.Deserialize<string>(msg.Body);
+                            _logger.LogInformation("[Reindexing] Processing pidUri: " + pidUriString);
+                            var pidUri = new Uri(pidUriString);
+                            var resources = _resourceService.GetResourcesByPidUri(pidUri, _reIndexRunning);
+                            var resourceIndexingDto = new ResourceIndexingDTO(ResourceCrudAction.Reindex, pidUri, resources.GetDraftOrPublishedVersion(), resources);
+                            IndexResource(resourceIndexingDto);
+                        }
+                        catch (System.Exception ex)
+                        {
+                            _logger.LogError("[Reindexing] Something went wrong : " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                        }
+                    }
+
+                } while (msgcount > 0);
+
+                //If some messages are processed then trigger switch
+                if (msgProcessed)
+                {
+                    int msgCount = _amazonSQSService.GetMessageCountAsync(_indexingPidUriInputQueueUrl).Result;
+                    if (msgCount == 0)
+                    {
+                        SwitchIndex();
+                    }
+                }
             }
             catch (System.Exception ex)
             {
-                _logger.LogError(ex, $"Something went wrong while reindex resource {pidUriString} by message queue");
+                _logger.LogError($"[Reindexing] Something went wrong " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
             }
+
+            _reIndexRunning = false;
+        }
+
+        /// <summary>
+        /// Switch Index after completing ReIndexing
+        /// </summary>        
+        private async void SwitchIndex()
+        {            
+            //Initiate Switch logic.            
+            using (var httpClient = (_bypassProxy ? _clientFactory.CreateClient("NoProxy") : _clientFactory.CreateClient()))
+            {
+                using (var cancelSource = new CancellationTokenSource())
+                {
+                    _logger.LogInformation("[Reindexing] Going for Switch Index " + _searchServiceIndexUrl + "index/switchIndex");
+
+                    var accessToken = await _searchServiceTokenService.GetAccessTokenForWebApiAsync();
+                    var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Post, _searchServiceIndexUrl + "index/switchIndex", null,
+                            accessToken, cancelSource.Token);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogError("[Reindexing] Switching index went wrong {responseContent}", response.Content);
+                    }
+                }
+            }
+            _cacheService.Clear();            
+        }
+
+        /// <summary>
+        /// Fetch Resource DTO from SQS and Index
+        /// </summary>        
+        public async void IndexResource()
+        {
+            //Lock method so that multiple call from Background service does not invoke this method when its busy processing messages
+            lock (_indexlock)
+            {
+                if (_indexRunning)
+                {
+                    return;
+                }
+                else
+                {
+                    _indexRunning = true;
+                }
+            }
+
+            try
+            {
+                //Check for msgs in a loop           
+                int msgcount = 0;
+                bool msgProcessed = false;
+                do
+                {
+                    //Check msgs available in SQS                      
+                    var msgs = await _amazonSQSService.ReceiveMessageAsync(_indexingResourceDTOInputQueueUrl, 2, 10);
+                    msgcount = msgs.Count;
+
+                    //Iterate on each msg which containing a pidUri
+                    foreach (var msg in msgs)
+                    {
+                        msgProcessed = true;
+                        try
+                        {
+                            //Delete the msg from SQS Queue before it times out
+                            await _amazonSQSService.DeleteMessageAsync(_indexingResourceDTOInputQueueUrl, msg.ReceiptHandle);
+                            //Then process the msg
+                            var resDtoString = System.Text.Json.JsonSerializer.Deserialize<string>(msg.Body);
+                            await IndexResourceFromTopic(resDtoString);
+                        }
+                        catch (System.Exception ex)
+                        {
+                            _logger.LogError("[Indexing] Something went wrong : " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                        }
+                    }
+
+                } while (msgcount > 0);                
+            }
+            catch (System.Exception ex)
+            {
+                _logger.LogError($"[Indexing] Something went wrong " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+            }
+
+            _indexRunning = false;
         }
 
         private IndexDocumentDto GenerateIndexDocument(ResourceIndexingDTO resourceIndexingDto, IList<MetadataProperty> metadataProperties)
         {
             var currentLifeCycle = resourceIndexingDto.Resource.Properties.GetValueOrNull(Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus, true);
 
-            _logger.LogInformation("[Indexing] Generating mq message for resource\nPidUri={PidUri}", resourceIndexingDto.PidUri);
+            //_logger.LogInformation("[Indexing] Generating mq message for resource PidUri={PidUri}", resourceIndexingDto.PidUri);
 
             var linkingLevelIndexer = 0;
             var mqMessageDict = GenerateMqMessage(resourceIndexingDto, resourceIndexingDto.Resource, metadataProperties, linkingLevelIndexer);
@@ -449,7 +624,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
             AddAdditionalMqProperties(resourceIndexingDto, mqMessageDict, metadataProperties);
 
-            _logger.LogInformation("[Indexing] Generated mq message for resource\nPidUri={PidUri}", resourceIndexingDto.PidUri);
+            //_logger.LogInformation("[Indexing] Generated mq message for resource PidUri={PidUri}", resourceIndexingDto.PidUri);
 
             var indexDocument = new IndexDocumentDto(resourceIndexingDto.PidUri, resourceIndexingDto.Action, currentLifeCycle, mqMessageDict);
 
@@ -826,14 +1001,14 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 var mqProperty = new MessageQueueDirectionPropertyDTO(nestedEntity.Id, pidUri, propertyKey);
 
                 string typeOfNestedEntity = nestedEntity.Properties.GetValueOrNull(Graph.Metadata.Constants.RDF.Type, true);
-                if (typeOfNestedEntity == null || string.IsNullOrWhiteSpace(typeOfNestedEntity))
-                {
-                    _logger.LogWarning($"No type predicate for nested entity {JsonConvert.SerializeObject(nestedEntity)}.");
-                }
-                if (metadataProperty.NestedMetadata == null)
-                {
-                    _logger.LogWarning($"No nested metadata for nested entity {JsonConvert.SerializeObject(nestedEntity)}.");
-                }
+                //if (typeOfNestedEntity == null || string.IsNullOrWhiteSpace(typeOfNestedEntity))
+                //{
+                //    _logger.LogWarning($"No type predicate for nested entity {JsonConvert.SerializeObject(nestedEntity)}.");
+                //}
+                //if (metadataProperty.NestedMetadata == null)
+                //{
+                //    _logger.LogWarning($"No nested metadata for nested entity {JsonConvert.SerializeObject(nestedEntity)}.");
+                //}
 
                 Metadata metadataForNestedEntityType = null;
 
@@ -859,7 +1034,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
                 if (metadataForNestedEntityType == null)
                 {
-                    _logger.LogWarning($"No nested metadata for nested entity type {typeOfNestedEntity}.");
+                    //_logger.LogWarning($"No nested metadata for nested entity type {typeOfNestedEntity}.");
                 }
                 else
                 {
@@ -913,7 +1088,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
             if (Uri.TryCreate(value, UriKind.Absolute, out linkedPidURi))
             {
-                var resources = _resourceService.GetResourcesByPidUri(linkedPidURi,false);
+                var resources = _resourceService.GetResourcesByPidUri(linkedPidURi, _reIndexRunning);
 
                 if (resources != null && resources.HasPublishedOrDraft)
                 {
@@ -947,17 +1122,18 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
                 if (metadataProperty.IsControlledVocabulary(out var range) || metadataProperty.Key == Graph.Metadata.Constants.RDF.Type)
                 {
                     IList<TaxonomyResultDTO> taxonomies;
-
+                    var cancelSource = new CancellationTokenSource();
                     using (var httpClient = (_bypassProxy ? _clientFactory.CreateClient("NoProxy") : _clientFactory.CreateClient()))
                     {
+                        
                         _logger.LogInformation("[Indexing] Setup metadata mapping: Start retrieving taxonomies");
                         var encodedRange = HttpUtility.UrlEncode(range);
                         var registrationServiceGetTaxonomyListUrl = $"{_configuration.GetConnectionString("colidRegistrationServiceUrl")}/api/v3/taxonomyList?taxonomyType={encodedRange}";
 
                         var accessToken = await _registrationServiceTokenService.GetAccessTokenForWebApiAsync();
                         var response = await httpClient.SendRequestWithOptionsAsync(HttpMethod.Get, registrationServiceGetTaxonomyListUrl,
-                            null, accessToken, _cancellationToken);
-
+                            null, accessToken, cancelSource.Token);
+                        
                         if (!response.IsSuccessStatusCode)
                         {
                             _logger.LogError("[Reindexing] Something went wrong while getting taxonomy, response={response}", response);
@@ -995,7 +1171,7 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
 
         private static bool IsIgnoredMetadataProperty(string propertyKey, MetadataProperty metadataProperty, bool inboundProperty = false)
         {
-            if  (propertyKey == Graph.Metadata.Constants.Resource.HasPidEntryDraft)
+            if (propertyKey == Graph.Metadata.Constants.Resource.HasPidEntryDraft)
                 return true;
             else if (propertyKey == Graph.Metadata.Constants.Resource.HasEntryLifecycleStatus)
                 return false;
@@ -1006,6 +1182,8 @@ namespace COLID.IndexingCrawlerService.Services.Implementation
             else if (propertyKey == "https://pid.bayer.com/kos/19050/hasBrokenEndpointContact")
                 return false;
             else if (propertyKey == "https://pid.bayer.com/kos/19050/hasEndpointURLStatus")
+                return false;
+            else if (propertyKey == "https://pid.bayer.com/kos/19050#collibraRegistrationSuccess")
                 return false;
 
             if (metadataProperty == null)

@@ -9,5 +9,21 @@ namespace COLID.IndexingCrawlerService.Services.Interfaces
         /// Then all available publsihed pid uris are sent to the mq for reindexing.
         /// </summary>
         Task StartReindex();
+
+        /// <summary>
+        /// Index a document
+        /// </summary>
+        /// <param name="indexedResourceString">resource in json string format</param>
+        Task IndexResourceFromTopic(string indexedResourceString);
+
+        /// <summary>
+        /// Fetch pidUris from SQS and start Indexing
+        /// </summary>        
+        void ReindexResource(string action);
+
+        // <summary>
+        /// Fetch Resource DTO from SQS and Index
+        /// </summary>        
+        void IndexResource();
     }
 }
